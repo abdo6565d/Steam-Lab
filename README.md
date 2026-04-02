@@ -1,20 +1,17 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# STEAM Lab
 
-# Run and deploy your AI Studio app
+A high-tech lab tool for STEAM students and instructors to reduce bottlenecking with visual debugging, real-world context, and activity generation.
 
-This contains everything you need to run your app locally.
+## Features
+- **Custom Builder**: Design and debug your STEAM projects.
+- **Context Engine**: Get real-world context and AI-powered insights.
+- **Level-Up**: Generate activities and challenges to enhance learning.
+- **Saved Projects**: Manage and reload your previous lab work.
 
-View your app in AI Studio: https://ai.studio/apps/9ed0c654-a255-464f-90ec-b5f54cdf06dd
+## Getting Started
+1. Install dependencies: `npm install`
+2. Run in development: `npm run dev`
+3. Build for production: `npm run build`
 
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Documentation
+- [Deployment Guide](docs/deployment.md)
