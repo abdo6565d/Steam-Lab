@@ -4,7 +4,8 @@ import {
   Zap, CircleDot, RotateCw, Radio, Move, Thermometer, Plus, X, ArrowRight, 
   Sparkles, Loader2, MessageSquare, Code, Hash, Grid, Cpu, Sun, Eye, 
   Droplets, Palette, Volume2, Bell, Music, Gamepad2, Wind, Target, 
-  Activity, Waves, ToggleRight, ClipboardList, Save, CheckCircle2
+  Activity, Waves, ToggleRight, ClipboardList, Save, CheckCircle2, 
+  Wifi, Sprout, Compass, RotateCcw, RefreshCw, Monitor, Keyboard, Settings2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -15,7 +16,8 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 const ICON_MAP: Record<string, any> = {
   Zap, CircleDot, RotateCw, Radio, Move, Thermometer, Hash, Grid, Cpu, 
   Sun, Eye, Droplets, Palette, Volume2, Bell, Music, Gamepad2, Wind, 
-  Target, Activity, Waves, ToggleRight
+  Target, Activity, Waves, ToggleRight, Wifi, Sprout, Compass, 
+  RotateCcw, RefreshCw, Monitor, Keyboard, Settings2
 };
 
 interface WiringBridgeProps {

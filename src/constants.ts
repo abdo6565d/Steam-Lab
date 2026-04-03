@@ -288,6 +288,131 @@ export const POPULAR_COMPONENTS: PopularComponent[] = [
       { componentPin: 'GND', arduinoPin: 'GND' },
       { componentPin: 'IN', arduinoPin: 'Digital Pin (e.g., D7)' }
     ]
+  },
+  {
+    id: 'arduino-uno',
+    name: 'Arduino Uno',
+    icon: 'Cpu',
+    description: 'The most popular microcontroller for beginners.',
+    wiring: [
+      { componentPin: 'USB', arduinoPin: 'Computer' },
+      { componentPin: 'Barrel Jack', arduinoPin: '7-12V Power' }
+    ]
+  },
+  {
+    id: 'esp32',
+    name: 'ESP32',
+    icon: 'Wifi',
+    description: 'Powerful microcontroller with built-in Wi-Fi and Bluetooth.',
+    wiring: [
+      { componentPin: 'VCC', arduinoPin: '3.3V' },
+      { componentPin: 'GND', arduinoPin: 'GND' },
+      { componentPin: 'EN', arduinoPin: 'Reset Button' }
+    ]
+  },
+  {
+    id: 'dht11',
+    name: 'DHT11',
+    icon: 'Thermometer',
+    description: 'Basic digital temperature and humidity sensor.',
+    wiring: [
+      { componentPin: 'VCC', arduinoPin: '5V' },
+      { componentPin: 'GND', arduinoPin: 'GND' },
+      { componentPin: 'DATA', arduinoPin: 'Digital Pin (e.g., D2)', note: 'Use 10kΩ pull-up resistor' }
+    ],
+    extraParts: ['10kΩ Resistor']
+  },
+  {
+    id: 'pir-sensor',
+    name: 'PIR Sensor',
+    icon: 'Move',
+    description: 'Passive Infrared sensor for motion detection.',
+    wiring: [
+      { componentPin: 'VCC', arduinoPin: '5V' },
+      { componentPin: 'GND', arduinoPin: 'GND' },
+      { componentPin: 'OUT', arduinoPin: 'Digital Pin (e.g., D2)' }
+    ]
+  },
+  {
+    id: 'soil-moisture',
+    name: 'Soil Moisture',
+    icon: 'Sprout',
+    description: 'Measures the volumetric content of water in soil.',
+    wiring: [
+      { componentPin: 'VCC', arduinoPin: '5V' },
+      { componentPin: 'GND', arduinoPin: 'GND' },
+      { componentPin: 'AO', arduinoPin: 'Analog Pin (e.g., A0)' }
+    ]
+  },
+  {
+    id: 'mpu6050',
+    name: 'MPU6050',
+    icon: 'Compass',
+    description: '6-axis Gyroscope and Accelerometer (I2C).',
+    wiring: [
+      { componentPin: 'VCC', arduinoPin: '3.3V' },
+      { componentPin: 'GND', arduinoPin: 'GND' },
+      { componentPin: 'SCL', arduinoPin: 'A5 (Uno) / SCL' },
+      { componentPin: 'SDA', arduinoPin: 'A4 (Uno) / SDA' }
+    ]
+  },
+  {
+    id: 'servo-motor',
+    name: 'Servo Motor',
+    icon: 'RotateCcw',
+    description: 'Precise position control motor (0-180 degrees).',
+    wiring: [
+      { componentPin: 'Red (VCC)', arduinoPin: '5V' },
+      { componentPin: 'Brown (GND)', arduinoPin: 'GND' },
+      { componentPin: 'Orange (PWM)', arduinoPin: 'Digital Pin (e.g., D9)' }
+    ]
+  },
+  {
+    id: 'stepper-motor',
+    name: 'Stepper Motor',
+    icon: 'RefreshCw',
+    description: '28BYJ-48 with ULN2003 driver for precise rotation.',
+    wiring: [
+      { componentPin: 'IN1-IN4', arduinoPin: 'D8, D9, D10, D11' },
+      { componentPin: 'VCC', arduinoPin: '5V (External recommended)' },
+      { componentPin: 'GND', arduinoPin: 'GND' }
+    ],
+    extraParts: ['ULN2003 Driver']
+  },
+  {
+    id: 'lcd-i2c',
+    name: 'I2C LCD 16x2',
+    icon: 'Monitor',
+    description: 'Liquid Crystal Display using only 2 wires (I2C).',
+    wiring: [
+      { componentPin: 'VCC', arduinoPin: '5V' },
+      { componentPin: 'GND', arduinoPin: 'GND' },
+      { componentPin: 'SDA', arduinoPin: 'A4' },
+      { componentPin: 'SCL', arduinoPin: 'A5' }
+    ]
+  },
+  {
+    id: 'keypad',
+    name: '4x4 Keypad',
+    icon: 'Keyboard',
+    description: 'Matrix keypad for user input.',
+    wiring: [
+      { componentPin: 'R1-R4', arduinoPin: 'D9, D8, D7, D6' },
+      { componentPin: 'C1-C4', arduinoPin: 'D5, D4, D3, D2' }
+    ]
+  },
+  {
+    id: 'rotary-encoder',
+    name: 'Rotary Encoder',
+    icon: 'Settings2',
+    description: 'Infinite rotation knob with push button.',
+    wiring: [
+      { componentPin: 'CLK', arduinoPin: 'D2 (Interrupt)' },
+      { componentPin: 'DT', arduinoPin: 'D3' },
+      { componentPin: 'SW', arduinoPin: 'D4' },
+      { componentPin: 'VCC', arduinoPin: '5V' },
+      { componentPin: 'GND', arduinoPin: 'GND' }
+    ]
   }
 ];
 
@@ -337,6 +462,78 @@ export const PROJECTS: Project[] = [
         description: "Limits current to protect the LED.",
         pins: ["Side A", "Side B"],
         commonMistakes: ["Using wrong resistance", "Shorting the legs"]
+      }
+    ]
+  },
+  {
+    id: "smart-plant",
+    name: "Smart Plant Watering System",
+    description: "Create an automated system that monitors soil moisture and waters your plant when it's thirsty.",
+    subject: "Agriculture Tech",
+    difficulty: "Advanced",
+    tags: ["IoT", "Automation", "Sustainability"],
+    components: [
+      {
+        id: "soil-moisture",
+        name: "Soil Moisture Sensor",
+        description: "Detects water levels in soil.",
+        pins: ["VCC", "GND", "AO"],
+        commonMistakes: ["Corrosion due to constant power", "Incorrect calibration"]
+      },
+      {
+        id: "pump-motor",
+        name: "Submersible Pump",
+        description: "Moves water to the plant.",
+        pins: ["VCC", "GND"],
+        commonMistakes: ["Running dry", "Connecting directly to Arduino pins"]
+      }
+    ]
+  },
+  {
+    id: "weather-station",
+    name: "IoT Weather Station",
+    description: "Build a station that tracks temperature and humidity, displaying data locally and online.",
+    subject: "Environmental Science",
+    difficulty: "Intermediate",
+    tags: ["ESP32", "Data", "WiFi"],
+    components: [
+      {
+        id: "dht11",
+        name: "DHT11 Sensor",
+        description: "Measures temperature and humidity.",
+        pins: ["VCC", "GND", "DATA"],
+        commonMistakes: ["Reading too frequently", "Wrong pull-up resistor"]
+      },
+      {
+        id: "lcd-i2c",
+        name: "I2C LCD",
+        description: "Displays real-time data.",
+        pins: ["VCC", "GND", "SDA", "SCL"],
+        commonMistakes: ["Incorrect I2C address", "Contrast knob not adjusted"]
+      }
+    ]
+  },
+  {
+    id: "motion-alarm",
+    name: "Motion-Activated Security Alarm",
+    description: "Secure your room with a system that sounds an alarm and flashes lights when motion is detected.",
+    subject: "Security Systems",
+    difficulty: "Beginner",
+    tags: ["Safety", "Sensors", "Buzzer"],
+    components: [
+      {
+        id: "pir-sensor",
+        name: "PIR Motion Sensor",
+        description: "Detects human movement.",
+        pins: ["VCC", "GND", "OUT"],
+        commonMistakes: ["Sensitivity set too high", "Not waiting for warm-up time"]
+      },
+      {
+        id: "buzzer",
+        name: "Active Buzzer",
+        description: "Sounds the alarm.",
+        pins: ["+", "-"],
+        commonMistakes: ["Reversed polarity"]
       }
     ]
   }
