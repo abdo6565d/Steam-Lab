@@ -1,4 +1,4 @@
-import { POPULAR_COMPONENTS, CustomConnection, WireSuggestion, CircuitResult, ResistorItem, SavedProject } from '../constants';
+import { POPULAR_COMPONENTS, CustomConnection, ConnectionMode, WireSuggestion, CircuitResult, ResistorItem, SavedProject } from '../constants';
 
 // Hardware Pinout Definitions and Capabilities
 const DIGITAL_PINS = ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13'];
@@ -384,7 +384,10 @@ const int MOTOR_IN2 = ${pins['IN2'] ? pins['IN2'].replace('D', '') : '4'};`,
 /**
  * Self-Processing Collision-Free Pin Allocation
  */
-export function allocatePins(selectedComponentIds: string[]): {
+export function allocatePins(
+  selectedComponentIds: string[],
+  connectionModes: Record<string, ConnectionMode> = {}
+): {
   connections: CustomConnection[];
   assignedPinsByComp: Record<string, Record<string, string>>;
 } {
@@ -405,6 +408,15 @@ export function allocatePins(selectedComponentIds: string[]): {
     if (!rule) continue;
 
     assignedPinsByComp[compId] = {};
+
+    // Determine connection mode: direct to Arduino header vs mounted through breadboard
+    // Discrete passive components default to breadboard; modular breakout boards default to direct or breadboard
+    const mode: ConnectionMode = connectionModes[compId] || (
+      ['led', 'resistor', 'resistor-330', 'ldr', 'push-button'].includes(compId)
+        ? 'breadboard'
+        : 'direct'
+    );
+    const isDirect = mode === 'direct';
 
     for (const pin of rule.pins) {
       let finalPin = pin.preferredArduinoPin;
@@ -436,11 +448,13 @@ export function allocatePins(selectedComponentIds: string[]): {
 
       assignedPinsByComp[compId][pin.pinName] = finalPin;
 
+      // Exactly ONE unambiguous connection entry per pin - never duplicate direct and breadboard!
       connections.push({
         compId: compId,
         compPin: pin.pinName,
         arduinoPin: finalPin,
-        breadboardCoords: `${pin.breadboardRow}, Col ${pin.breadboardCol}`
+        connectionMode: mode,
+        breadboardCoords: isDirect ? undefined : `${pin.breadboardRow}, Col ${pin.breadboardCol}`
       });
     }
   }
@@ -454,9 +468,10 @@ export function allocatePins(selectedComponentIds: string[]): {
 export function generateSchematicLocal(
   selectedComponentIds: string[],
   intent: string,
-  resistors: ResistorItem[] = []
+  resistors: ResistorItem[] = [],
+  connectionModes: Record<string, ConnectionMode> = {}
 ): CircuitResult {
-  const { connections, assignedPinsByComp } = allocatePins(selectedComponentIds);
+  const { connections, assignedPinsByComp } = allocatePins(selectedComponentIds, connectionModes);
 
   const hasDS18B20 = selectedComponentIds.includes('ds18b20');
   const hasLED = selectedComponentIds.includes('led');
@@ -468,7 +483,7 @@ export function generateSchematicLocal(
   const hasLDR = selectedComponentIds.includes('ldr');
   const hasLCD = selectedComponentIds.includes('lcd-i2c');
 
-  // Handle Resistors integration
+  // Handle Resistors integration (Always mounted on breadboard)
   if (resistors && resistors.length > 0) {
     resistors.forEach((res, idx) => {
       let sideA = 'Circuit Node';
@@ -499,6 +514,7 @@ export function generateSchematicLocal(
         compId: res.id,
         compPin: `Pin 1 (${res.value})`,
         arduinoPin: sideA,
+        connectionMode: 'breadboard',
         breadboardCoords: `${row}, Col ${col}`
       });
 
@@ -506,39 +522,89 @@ export function generateSchematicLocal(
         compId: res.id,
         compPin: `Pin 2 (${res.value})`,
         arduinoPin: sideB,
+        connectionMode: 'breadboard',
         breadboardCoords: `${row}, Col ${col + 1}`
       });
     });
   }
 
-  // Wires Calculation
-  const totalPowerLines = connections.filter(c => c.arduinoPin === '5V' || c.arduinoPin === '3.3V').length;
-  const totalGndLines = connections.filter(c => c.arduinoPin === 'GND').length;
-  const signalWires = connections.filter(c => c.arduinoPin.startsWith('D') || c.arduinoPin.startsWith('A')).length;
+  // Wires Calculation based on explicit connection modes
+  const directConnections = connections.filter(c => c.connectionMode === 'direct');
+  const breadboardConnections = connections.filter(c => c.connectionMode === 'breadboard');
 
-  const wires: WireSuggestion[] = [
-    {
+  const wires: WireSuggestion[] = [];
+
+  if (breadboardConnections.length > 0) {
+    const bbSignalWires = breadboardConnections.filter(c => c.arduinoPin.startsWith('D') || c.arduinoPin.startsWith('A')).length;
+    wires.push({
       type: 'Male-to-Male',
-      count: Math.max(4, signalWires + 2),
-      reason: 'Connects Arduino digital and analog headers directly into the breadboard tie-points.'
-    },
-    {
+      count: Math.max(2, bbSignalWires + 2),
+      reason: 'Connects breadboard tie-points and power rails directly to Arduino Uno headers.'
+    });
+  }
+
+  if (directConnections.length > 0) {
+    wires.push({
       type: 'Male-to-Female',
-      count: hasUltrasonic ? 4 : (hasDS18B20 ? 3 : (hasServo ? 3 : 2)),
-      reason: 'Connects header pins on modular sensors (e.g. Ultrasonic HC-SR04, Servo cable, Sensor probe) to the breadboard.'
-    },
-    {
-      type: 'Male-to-Male',
-      count: Math.max(2, totalPowerLines + totalGndLines),
-      reason: 'Bridges 5V and GND from Arduino Uno to the breadboard power distribution buses (+ and -).'
-    }
-  ];
+      count: directConnections.length,
+      reason: 'Direct Dupont jumper cables connecting modular sensor pins directly to Arduino Uno headers (bypassing breadboard).'
+    });
+  }
 
-  // Breadboard Guide
-  const breadboardGuide = `### Self-Processing Breadboard Assembly Steps:
-1. **Power Buses**: Connect Arduino **5V** to the breadboard **Red (+) Rail** and **GND** to the **Blue (-) Rail**.
-2. **Component Placement**: Insert components into their designated rows (see coordinates column). Ensure legs of components bridge across the central divider where applicable.
-${hasDS18B20 ? '3. **DS18B20 1-Wire Pull-Up**: Bridge a 4.7kΩ resistor across the 5V bus (Row C, Col 13) and the DATA signal line to stabilize digital temperature readings.\n' : ''}${hasLED ? '4. **LED Current Limiter**: Connect the 220Ω resistor in series between the Arduino output pin and the long anode leg of the LED.\n' : ''}5. **Signal Routing**: Connect the respective signal jumper wires from Arduino headers to the corresponding component columns.`;
+  // Common power and GND if breadboard rails are used
+  const hasBreadboardRails = breadboardConnections.some(c => c.arduinoPin === '5V' || c.arduinoPin === 'GND' || c.arduinoPin.includes('Rail'));
+  if (hasBreadboardRails) {
+    wires.push({
+      type: 'Male-to-Male',
+      count: 2,
+      reason: 'Power distribution jumpers (5V & GND) from Arduino to breadboard power rails (+ and -).'
+    });
+  }
+
+  // Assemble Breadboard and Direct Wiring Guide
+  const directComps = selectedComponentIds.filter(id => {
+    const mode = connectionModes[id] || (
+      ['led', 'resistor', 'resistor-330', 'ldr', 'push-button'].includes(id)
+        ? 'breadboard'
+        : 'direct'
+    );
+    return mode === 'direct';
+  });
+
+  const breadboardComps = selectedComponentIds.filter(id => !directComps.includes(id));
+
+  const guideSections: string[] = ['### Self-Processing Circuit Assembly Guide:'];
+
+  if (breadboardComps.length > 0 || resistors.length > 0) {
+    guideSections.push('#### Part 1: Breadboard Connections');
+    guideSections.push('1. **Power Rails**: Connect Arduino **5V** to Breadboard **Red (+) Rail** and Arduino **GND** to **Blue (-) Rail**.');
+    guideSections.push('2. **Mounted Components**: Insert the following breadboard-configured components into their designated rows (do NOT double-wire to Arduino directly to avoid conflicts):');
+    breadboardComps.forEach(id => {
+      const rule = COMPONENT_RULES[id];
+      if (rule) {
+        guideSections.push(`   - **${rule.name}**: Insert pins into ${rule.pins.map(p => `${p.pinName} at ${p.breadboardRow}, Col ${p.breadboardCol}`).join('; ')}.`);
+      }
+    });
+    if (resistors.length > 0) {
+      guideSections.push(`   - **Resistors (${resistors.length})**: Bridge designated tie-points across rows for current limiting or 1-Wire pull-ups.`);
+    }
+    guideSections.push('3. **Jumper Wires to Arduino**: Run Male-to-Male jumper wires from the breadboard tie-point columns into the assigned Arduino pins.');
+  }
+
+  if (directComps.length > 0) {
+    guideSections.push('#### Part 2: Direct-to-Arduino Connections (No Breadboard)');
+    guideSections.push('The following modules connect **DIRECTLY** to Arduino headers via Female-to-Male jumper cables without touching the breadboard:');
+    directComps.forEach(id => {
+      const rule = COMPONENT_RULES[id];
+      if (rule) {
+        const pinMap = assignedPinsByComp[id] || {};
+        guideSections.push(`   - **${rule.name}**: ${Object.entries(pinMap).map(([pName, aPin]) => `${pName} ➔ Arduino ${aPin}`).join(', ')}.`);
+      }
+    });
+    guideSections.push('*(Note: Direct connection completely eliminates breadboard contact conflicts and avoids duplicate wiring).*');
+  }
+
+  const breadboardGuide = guideSections.join('\n');
 
   // Code Synthesis
   const libraries = new Set<string>();

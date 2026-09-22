@@ -46,10 +46,13 @@ export interface WireSuggestion {
   reason: string;
 }
 
+export type ConnectionMode = 'direct' | 'breadboard';
+
 export interface CustomConnection {
   compId: string;
   compPin: string;
   arduinoPin: string;
+  connectionMode?: ConnectionMode;
   breadboardCoords?: string;
 }
 
@@ -79,6 +82,7 @@ export interface SavedProject {
   result: AIResult;
   resistorValue?: string;
   resistors?: ResistorItem[];
+  componentConnectionModes?: Record<string, ConnectionMode>;
 }
 
 export interface PopularComponent {
