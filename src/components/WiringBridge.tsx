@@ -1,24 +1,42 @@
-import React, { useState, useEffect } from 'react';
-import { POPULAR_COMPONENTS, PopularComponent, AIResult, SavedProject } from '../constants';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { POPULAR_COMPONENTS, PopularComponent, AIResult, SavedProject, CustomConnection, ResistorItem } from '../constants';
+import { generateSchematicLocal } from '../lib/selfProcessingEngine';
 import { 
   Zap, CircleDot, RotateCw, Radio, Move, Thermometer, Plus, X, ArrowRight, 
   Sparkles, Loader2, MessageSquare, Code, Hash, Grid, Cpu, Sun, Eye, 
   Droplets, Palette, Volume2, Bell, Music, Gamepad2, Wind, Target, 
   Activity, Waves, ToggleRight, ClipboardList, Save, CheckCircle2, 
-  Wifi, Sprout, Compass, RotateCcw, RefreshCw, Monitor, Keyboard, Settings2
+  Wifi, Sprout, Compass, RotateCcw, RefreshCw, Monitor, Keyboard, Settings2, Bluetooth,
+  BookOpen, Cloud, Edit2, Trash2, PlusCircle, Check, Sliders, Layers
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
-import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+import Stopwatch from './Stopwatch';
+import { AlertCircle } from 'lucide-react';
 
 const ICON_MAP: Record<string, any> = {
   Zap, CircleDot, RotateCw, Radio, Move, Thermometer, Hash, Grid, Cpu, 
   Sun, Eye, Droplets, Palette, Volume2, Bell, Music, Gamepad2, Wind, 
   Target, Activity, Waves, ToggleRight, Wifi, Sprout, Compass, 
-  RotateCcw, RefreshCw, Monitor, Keyboard, Settings2
+  RotateCcw, RefreshCw, Monitor, Keyboard, Settings2, Bluetooth
 };
+
+const STANDARD_ARDUINO_PINS = [
+  '5V', '3.3V', 'GND', 'VIN',
+  'D2', 'D3', 'D4', 'D5', 'D6', 'D7',
+  'D8', 'D9', 'D10', 'D11', 'D12', 'D13',
+  'A0', 'A1', 'A2', 'A3', 'A4', 'A5'
+];
+
+const POPULAR_RESISTOR_PRESETS = [
+  { value: '220Ω', label: '220Ω (LEDs)' },
+  { value: '330Ω', label: '330Ω (Signals)' },
+  { value: '1kΩ', label: '1kΩ (Protection)' },
+  { value: '2.2kΩ', label: '2.2kΩ (Dividers)' },
+  { value: '4.7kΩ', label: '4.7kΩ (DS18B20 1-Wire)' },
+  { value: '10kΩ', label: '10kΩ (Pull-Up/Down)' },
+  { value: '100kΩ', label: '100kΩ (High Z)' }
+];
 
 interface WiringBridgeProps {
   onSave: (project: SavedProject) => void;
@@ -28,102 +46,441 @@ interface WiringBridgeProps {
 
 export default function WiringBridge({ onSave, initialProject, onProjectChange }: WiringBridgeProps) {
   // Custom Builder State
+  const [projectId, setProjectId] = useState<string>(() => initialProject?.id || Math.random().toString(36).substring(2, 11));
   const [selectedPopularIds, setSelectedPopularIds] = useState<string[]>([]);
   const [intent, setIntent] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isExplainingCode, setIsExplainingCode] = useState(false);
   const [aiResult, setAiResult] = useState<AIResult | null>(null);
   const [isSaved, setIsSaved] = useState(false);
   const [projectName, setProjectName] = useState('');
+  const [generationError, setGenerationError] = useState<string | null>(null);
 
-  // Load initial project if provided
+  // Multi-Resistor Configuration State (Count & Value of each)
+  const [resistors, setResistors] = useState<ResistorItem[]>(() => {
+    if (initialProject?.resistors && initialProject.resistors.length > 0) {
+      return initialProject.resistors;
+    }
+    if (initialProject?.resistorValue) {
+      return [{ id: 'R1', value: initialProject.resistorValue }];
+    }
+    return [{ id: 'R1', value: '4.7kΩ' }];
+  });
+  const [customInputs, setCustomInputs] = useState<Record<number, string>>({});
+
+  // Auto-Save State
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('saved');
+  const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(true);
+  const [draftRestoredBanner, setDraftRestoredBanner] = useState(false);
+
+  // Connection editing state
+  const [editingPinIdx, setEditingPinIdx] = useState<number | null>(null);
+  const [customPinInput, setCustomPinInput] = useState('');
+  const [editingCoordsIdx, setEditingCoordsIdx] = useState<number | null>(null);
+  const [customCoordsInput, setCustomCoordsInput] = useState('');
+  const [showAddWireModal, setShowAddWireModal] = useState(false);
+  const [newWireCompId, setNewWireCompId] = useState('');
+  const [newWireCompPin, setNewWireCompPin] = useState('');
+  const [newWireArduinoPin, setNewWireArduinoPin] = useState('D2');
+  const [newWireCoords, setNewWireCoords] = useState('');
+
+  const isInitialMount = useRef(true);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastSavedStateRef = useRef<string>('');
+
+  // Load initial project if provided, or restore draft from localStorage
   useEffect(() => {
     if (initialProject) {
-      setSelectedPopularIds(initialProject.selectedComponentIds);
-      setIntent(initialProject.intent);
-      setAiResult(initialProject.result);
-      setProjectName(initialProject.name);
+      setProjectId(initialProject.id);
+      setSelectedPopularIds(initialProject.selectedComponentIds || []);
+      setIntent(initialProject.intent || '');
+      setAiResult(initialProject.result || null);
+      setProjectName(initialProject.name || '');
+      if (initialProject.resistors && initialProject.resistors.length > 0) {
+        setResistors(initialProject.resistors);
+      } else if (initialProject.resistorValue) {
+        setResistors([{ id: 'R1', value: initialProject.resistorValue }]);
+      }
       setIsSaved(true);
+      setAutoSaveStatus('saved');
+      if (initialProject.timestamp) {
+        setLastSavedTime(new Date(initialProject.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      }
+      lastSavedStateRef.current = JSON.stringify({
+        selectedComponentIds: initialProject.selectedComponentIds,
+        intent: initialProject.intent,
+        result: initialProject.result,
+        name: initialProject.name,
+        resistors: initialProject.resistors || [{ id: 'R1', value: initialProject.resistorValue || '4.7kΩ' }]
+      });
+    } else {
+      // Check if there is an existing draft in localStorage to prevent data loss
+      try {
+        const draftStr = localStorage.getItem('steam_custom_builder_draft');
+        if (draftStr) {
+          const draft = JSON.parse(draftStr);
+          if (draft && ((draft.selectedComponentIds && draft.selectedComponentIds.length > 0) || (draft.intent && draft.intent.trim().length > 0) || draft.result)) {
+            if (draft.id) setProjectId(draft.id);
+            if (draft.selectedComponentIds) setSelectedPopularIds(draft.selectedComponentIds);
+            if (draft.intent) setIntent(draft.intent);
+            if (draft.result) setAiResult(draft.result);
+            if (draft.name) setProjectName(draft.name);
+            if (draft.resistors && draft.resistors.length > 0) {
+              setResistors(draft.resistors);
+            } else if (draft.resistorValue) {
+              setResistors([{ id: 'R1', value: draft.resistorValue }]);
+            }
+            setDraftRestoredBanner(true);
+            if (draft.timestamp) {
+              setLastSavedTime(new Date(draft.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+            }
+            lastSavedStateRef.current = JSON.stringify({
+              selectedComponentIds: draft.selectedComponentIds,
+              intent: draft.intent,
+              result: draft.result,
+              name: draft.name,
+              resistors: draft.resistors || [{ id: 'R1', value: draft.resistorValue || '4.7kΩ' }]
+            });
+          }
+        }
+      } catch (e) {
+        console.error("Failed to restore draft from localStorage", e);
+      }
     }
   }, [initialProject]);
 
+  // Core auto-save execution function
+  const executeAutoSave = useCallback((
+    currentId: string,
+    currentName: string,
+    currentIntent: string,
+    currentComponentIds: string[],
+    currentResult: AIResult | null,
+    currentResistors: ResistorItem[]
+  ) => {
+    const primaryResistorVal = currentResistors[0]?.value || '4.7kΩ';
+    const currentStateStr = JSON.stringify({
+      selectedComponentIds: currentComponentIds,
+      intent: currentIntent,
+      result: currentResult,
+      name: currentName,
+      resistors: currentResistors
+    });
+
+    // Skip if nothing changed from last saved state
+    if (currentStateStr === lastSavedStateRef.current) {
+      return;
+    }
+
+    const timestamp = Date.now();
+
+    // Always update draft in localStorage
+    const draftData = {
+      id: currentId,
+      name: currentName || currentIntent.slice(0, 30) || 'Custom Project Draft',
+      selectedComponentIds: currentComponentIds,
+      intent: currentIntent,
+      result: currentResult,
+      resistorValue: primaryResistorVal,
+      resistors: currentResistors,
+      timestamp
+    };
+    try {
+      localStorage.setItem('steam_custom_builder_draft', JSON.stringify(draftData));
+    } catch (e) {
+      console.error("Failed to save draft to localStorage", e);
+    }
+
+    // If aiResult exists, update the full project in localStorage
+    if (currentResult) {
+      const projectToSave: SavedProject = {
+        id: currentId,
+        name: currentName.trim() || currentIntent.slice(0, 30) || 'Custom Arduino Project',
+        timestamp,
+        selectedComponentIds: currentComponentIds,
+        intent: currentIntent,
+        result: currentResult,
+        resistorValue: primaryResistorVal,
+        resistors: currentResistors
+      };
+
+      onSave(projectToSave);
+      onProjectChange(projectToSave);
+      setIsSaved(true);
+    }
+
+    lastSavedStateRef.current = currentStateStr;
+    setAutoSaveStatus('saved');
+    const now = new Date();
+    setLastSavedTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  }, [onSave, onProjectChange]);
+
+  // Trigger auto-save whenever wiring configuration, components, resistors list, or intent change
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
+    if (!autoSaveEnabled) return;
+
+    const currentStateStr = JSON.stringify({
+      selectedComponentIds: selectedPopularIds,
+      intent,
+      result: aiResult,
+      name: projectName,
+      resistors
+    });
+
+    if (currentStateStr === lastSavedStateRef.current) {
+      return;
+    }
+
+    setAutoSaveStatus('saving');
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    // Debounce to batch rapid keystrokes/clicks while ensuring prompt auto-save
+    debounceTimerRef.current = setTimeout(() => {
+      executeAutoSave(projectId, projectName, intent, selectedPopularIds, aiResult, resistors);
+    }, 500);
+
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [selectedPopularIds, intent, projectName, aiResult, resistors, autoSaveEnabled, projectId, executeAutoSave]);
+
+  // Flush auto-save immediately on page unload/navigation to prevent data loss
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      executeAutoSave(projectId, projectName, intent, selectedPopularIds, aiResult, resistors);
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [projectId, projectName, intent, selectedPopularIds, aiResult, resistors, executeAutoSave]);
+
   const togglePopularComponent = (id: string) => {
-    setSelectedPopularIds(prev => 
-      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
-    );
+    setSelectedPopularIds(prev => {
+      const isRemoving = prev.includes(id);
+      const next = isRemoving ? prev.filter(i => i !== id) : [...prev, id];
+      
+      // If user adds ds18b20 and no resistor has 4.7kΩ, ensure a 4.7kΩ resistor is available
+      if (!isRemoving && id === 'ds18b20') {
+        const has4k7 = resistors.some(r => r.value === '4.7kΩ');
+        if (!has4k7) {
+          if (next.includes('resistor') || next.includes('resistor-330')) {
+            // Update R1 to 4.7kΩ
+            setResistors(curr => curr.map((r, idx) => idx === 0 ? { ...r, value: '4.7kΩ', label: 'DS18B20 1-Wire' } : r));
+          }
+        }
+      }
+      return next;
+    });
     setIsSaved(false);
   };
+
+  // Multi-Resistor Management Functions
+  const addResistor = (suggestedValue = '220Ω', suggestedLabel = '') => {
+    const newIdx = resistors.length + 1;
+    const newResistor: ResistorItem = {
+      id: `R${newIdx}`,
+      value: suggestedValue,
+      label: suggestedLabel
+    };
+    setResistors(prev => [...prev, newResistor]);
+    setIsSaved(false);
+  };
+
+  const removeResistor = (index: number) => {
+    if (resistors.length <= 1) return;
+    setResistors(prev => {
+      const filtered = prev.filter((_, i) => i !== index);
+      return filtered.map((r, i) => ({ ...r, id: `R${i + 1}` }));
+    });
+    setIsSaved(false);
+  };
+
+  const updateResistorValue = (index: number, newValue: string) => {
+    setResistors(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], value: newValue };
+      return updated;
+    });
+    setIsSaved(false);
+  };
+
+  const applyCustomResistorValue = (index: number, val: string) => {
+    if (!val.trim()) return;
+    let formatted = val.trim();
+    if (!formatted.includes('Ω') && !formatted.toLowerCase().includes('ohm')) {
+      formatted += 'Ω';
+    }
+    updateResistorValue(index, formatted);
+    setCustomInputs(prev => ({ ...prev, [index]: '' }));
+  };
+
+  const setResistorCount = (count: number) => {
+    const target = Math.max(1, Math.min(8, count));
+    setResistors(prev => {
+      if (prev.length === target) return prev;
+      if (prev.length < target) {
+        const next = [...prev];
+        for (let i = prev.length; i < target; i++) {
+          next.push({ 
+            id: `R${i + 1}`, 
+            value: i === 1 ? '220Ω' : (i === 2 ? '10kΩ' : '1kΩ') 
+          });
+        }
+        return next;
+      } else {
+        return prev.slice(0, target).map((r, i) => ({ ...r, id: `R${i + 1}` }));
+      }
+    });
+    setIsSaved(false);
+  };
+
+  const isResistorSelected = selectedPopularIds.includes('resistor') || selectedPopularIds.includes('resistor-330');
+  const isDS18B20Selected = selectedPopularIds.includes('ds18b20');
+  const isLEDSelected = selectedPopularIds.includes('led');
 
   const generateSchematic = async () => {
     if (selectedPopularIds.length === 0 || !intent.trim()) return;
     
     setIsGenerating(true);
     setIsSaved(false);
+    setGenerationError(null);
     try {
-      const selectedNames = selectedPopularIds.map(id => POPULAR_COMPONENTS.find(c => c.id === id)?.name).join(', ');
-      const prompt = `You are an Arduino expert. A student wants to build a project with these components: ${selectedNames}. 
-      Their goal is: "${intent}".
-      
-      Provide:
-      1. Best wiring connections to an Arduino Uno.
-      2. Complete, well-commented Arduino C++ code to achieve the goal.
-      3. Suggestions for the number and type of jumper wires needed (Male-to-Male, Female-to-Female, Male-to-Female).
-      4. BREADBOARD GUIDANCE: If a breadboard is used, provide specific row (A-J) and column (1-30) coordinates for component placement and jumper wire connections.
-      
-      Return a JSON object with keys:
-      - "connections": Array of { "compId", "compPin", "arduinoPin", "breadboardCoords" }
-      - "code": String (the Arduino code)
-      - "wires": Array of { "type", "count", "reason" }
-      - "breadboardGuide": String (General instructions for breadboard layout)
-      
-      Component IDs to use: ${selectedPopularIds.join(', ')}.
-      Only suggest standard, safe connections. Be very specific about breadboard coordinates (e.g., "Row A, Col 15").`;
+      // 100% Deterministic Self-Processing Circuit Engine
+      await new Promise(r => setTimeout(r, 80)); // Brief smooth UI pulse
+      const data = generateSchematicLocal(selectedPopularIds, intent, resistors);
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: { responseMimeType: "application/json" }
-      });
-
-      const data = JSON.parse(response.text || "{}") as AIResult;
       setAiResult(data);
       
+      const effectiveName = projectName || (intent.slice(0, 30) + (intent.length > 30 ? '...' : ''));
       if (!projectName) {
-        setProjectName(intent.slice(0, 30) + (intent.length > 30 ? '...' : ''));
+        setProjectName(effectiveName);
       }
 
-      // Update parent state
-      onProjectChange({
-        id: initialProject?.id || Math.random().toString(36).substr(2, 9),
-        name: projectName || intent.slice(0, 30) + (intent.length > 30 ? '...' : ''),
-        timestamp: Date.now(),
-        selectedComponentIds: selectedPopularIds,
-        intent: intent,
-        result: data
-      });
+      // Automatically auto-save immediately to localStorage
+      executeAutoSave(projectId, effectiveName, intent, selectedPopularIds, data, resistors);
 
-    } catch (error) {
-      console.error("Failed to generate schematic:", error);
+    } catch (error: any) {
+      console.error("Failed to process schematic:", error);
+      setGenerationError(error?.message || "Failed to process schematic. Please try again.");
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const handleSave = () => {
+  const explainCode = async () => {
+    if (!aiResult?.code) return;
+    
+    setIsExplainingCode(true);
+    try {
+      // Local deterministic explanation synthesis
+      await new Promise(r => setTimeout(r, 100));
+      const explanation = aiResult.codeExplanation || 
+        `### Self-Processing Code Analysis\n- **Logic**: Directly synthesizes readings from ${selectedPopularIds.length} connected modules.\n- **Control Flow**: Initializes pins in setup() and executes continuous sampling and threshold tests in loop().`;
+
+      const updatedResult = { ...aiResult, codeExplanation: explanation };
+      setAiResult(updatedResult);
+
+      // Auto-save the updated explanation
+      executeAutoSave(projectId, projectName, intent, selectedPopularIds, updatedResult, resistors);
+
+    } catch (error: any) {
+      console.error("Failed to explain code:", error);
+    } finally {
+      setIsExplainingCode(false);
+    }
+  };
+
+  // Direct Wiring Modification Functions
+  const handleUpdatePin = (index: number, newPin: string) => {
     if (!aiResult) return;
-    const project: SavedProject = {
-      id: initialProject?.id || Math.random().toString(36).substr(2, 9),
-      name: projectName || 'Untitled Project',
-      timestamp: Date.now(),
-      selectedComponentIds: selectedPopularIds,
-      intent: intent,
-      result: aiResult
+    const updated = [...aiResult.connections];
+    updated[index] = { ...updated[index], arduinoPin: newPin };
+    const newAiResult = { ...aiResult, connections: updated };
+    setAiResult(newAiResult);
+    setIsSaved(false);
+    setEditingPinIdx(null);
+  };
+
+  const handleUpdateCoords = (index: number, newCoords: string) => {
+    if (!aiResult) return;
+    const updated = [...aiResult.connections];
+    updated[index] = { ...updated[index], breadboardCoords: newCoords.trim() || undefined };
+    const newAiResult = { ...aiResult, connections: updated };
+    setAiResult(newAiResult);
+    setIsSaved(false);
+    setEditingCoordsIdx(null);
+  };
+
+  const handleDeleteConnection = (index: number) => {
+    if (!aiResult) return;
+    const updated = aiResult.connections.filter((_, i) => i !== index);
+    const newAiResult = { ...aiResult, connections: updated };
+    setAiResult(newAiResult);
+    setIsSaved(false);
+  };
+
+  const handleAddWire = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiResult || !newWireCompId.trim() || !newWireCompPin.trim() || !newWireArduinoPin.trim()) return;
+
+    const newConnection: CustomConnection = {
+      compId: newWireCompId.trim(),
+      compPin: newWireCompPin.trim(),
+      arduinoPin: newWireArduinoPin.trim(),
+      breadboardCoords: newWireCoords.trim() || undefined
     };
-    onSave(project);
-    setIsSaved(true);
+
+    const newAiResult = {
+      ...aiResult,
+      connections: [...aiResult.connections, newConnection]
+    };
+
+    setAiResult(newAiResult);
+    setIsSaved(false);
+    setShowAddWireModal(false);
+    setNewWireCompId('');
+    setNewWireCompPin('');
+    setNewWireArduinoPin('D2');
+    setNewWireCoords('');
+  };
+
+  const handleManualSave = () => {
+    executeAutoSave(projectId, projectName, intent, selectedPopularIds, aiResult, resistors);
   };
 
   return (
     <div className="space-y-6">
+      {/* Draft Restored Banner */}
+      {draftRestoredBanner && (
+        <div className="bg-lab-accent/10 border border-lab-accent/30 rounded-xl px-4 py-2.5 flex items-center justify-between text-xs text-lab-accent">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-lab-accent shrink-0" />
+            <span>Restored your active wiring project from localStorage automatically.</span>
+          </div>
+          <button 
+            onClick={() => setDraftRestoredBanner(false)}
+            className="text-xs hover:text-white transition-colors underline font-medium"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Header and Auto-Save Status Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold flex items-center gap-2">
@@ -132,90 +489,404 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
           </h2>
           <p className="text-sm text-lab-muted">Design, Wire, and Code your Arduino project</p>
         </div>
-        {aiResult && (
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={projectName}
-              onChange={(e) => {
-                setProjectName(e.target.value);
-                setIsSaved(false);
-              }}
-              placeholder="Project Name..."
-              className="bg-black/30 border border-lab-border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-lab-accent w-40 sm:w-60 transition-all"
-            />
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Self-Processing Status Badge */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 font-semibold text-xs shadow-sm">
+            <Zap className="w-3.5 h-3.5 text-yellow-400" />
+            <span>Self-Processing System</span>
+          </div>
+
+          {/* Auto-Save Status Indicator */}
+          <div 
+            className={cn(
+              "flex items-center gap-2 px-3 py-2 rounded-xl border text-xs transition-all",
+              autoSaveStatus === 'saving' 
+                ? "bg-lab-accent/10 border-lab-accent/50 text-lab-accent shadow-sm" 
+                : "bg-black/30 border-lab-border text-lab-muted"
+            )}
+            title={autoSaveEnabled ? "Auto-save is actively writing to localStorage" : "Auto-save is paused"}
+          >
+            {autoSaveStatus === 'saving' ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-lab-accent shrink-0" />
+                <span className="text-[11px] font-semibold text-lab-accent whitespace-nowrap">Auto-saving...</span>
+              </>
+            ) : (
+              <>
+                <Cloud className="w-3.5 h-3.5 text-green-400 shrink-0" />
+                <span className="text-[11px] font-medium text-lab-text whitespace-nowrap">
+                  {lastSavedTime ? `Auto-saved ${lastSavedTime}` : 'Auto-save active'}
+                </span>
+              </>
+            )}
+
             <button
-              onClick={handleSave}
-              disabled={isSaved || !projectName.trim()}
+              type="button"
+              onClick={() => setAutoSaveEnabled(prev => !prev)}
               className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all",
-                isSaved 
-                  ? "bg-green-500/20 text-green-400 border border-green-500/50" 
-                  : "bg-lab-accent text-white hover:bg-orange-600 shadow-lg shadow-lab-accent/20 disabled:opacity-50"
+                "text-[9px] px-1.5 py-0.5 rounded font-bold uppercase transition-colors ml-1",
+                autoSaveEnabled 
+                  ? "bg-green-500/20 text-green-400 hover:bg-green-500/30" 
+                  : "bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30"
               )}
+              title="Toggle Auto-save protection"
             >
-              {isSaved ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-              {isSaved ? 'Saved' : 'Save'}
+              {autoSaveEnabled ? 'ON' : 'OFF'}
             </button>
           </div>
-        )}
+
+          {/* Project Name and Manual Save */}
+          {aiResult && (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={projectName}
+                onChange={(e) => {
+                  setProjectName(e.target.value);
+                  setIsSaved(false);
+                }}
+                placeholder="Project Name..."
+                className="bg-black/30 border border-lab-border rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-lab-accent w-36 sm:w-52 transition-all"
+              />
+              <button
+                onClick={handleManualSave}
+                disabled={!projectName.trim() && !intent.trim()}
+                className={cn(
+                  "flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition-all shrink-0",
+                  isSaved 
+                    ? "bg-green-500/20 text-green-400 border border-green-500/50" 
+                    : "bg-lab-accent text-white hover:bg-orange-600 shadow-lg shadow-lab-accent/20"
+                )}
+                title="Force instant save to localStorage"
+              >
+                {isSaved ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+                {isSaved ? 'Saved' : 'Save'}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="space-y-8">
         {/* Component Selector */}
         <div className="space-y-4">
-          <h3 className="text-sm font-bold uppercase tracking-widest text-lab-muted">Select Components</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold uppercase tracking-widest text-lab-muted">Select Components</h3>
+            <span className="text-[11px] text-lab-muted">
+              {selectedPopularIds.length} component{selectedPopularIds.length === 1 ? '' : 's'} selected • auto-saved
+            </span>
+          </div>
+
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
             {POPULAR_COMPONENTS.map(comp => {
               const Icon = ICON_MAP[comp.icon] || Zap;
-              const isSelected = selectedPopularIds.includes(comp.id);
+              const isSelected = selectedPopularIds.includes(comp.id) || (comp.id === 'resistor' && selectedPopularIds.includes('resistor-330'));
+              const isResistor = comp.id === 'resistor' || comp.id === 'resistor-330';
+              
+              let displayName = comp.name;
+              if (isResistor) {
+                if (resistors.length === 1) {
+                  displayName = `${resistors[0].value} Resistor`;
+                } else {
+                  displayName = `${resistors.length} Resistors (${resistors.map(r => r.value).join(', ')})`;
+                }
+              }
+
               return (
                 <button
                   key={comp.id}
                   onClick={() => togglePopularComponent(comp.id)}
                   className={cn(
-                    "flex flex-col items-center gap-3 p-4 rounded-2xl border transition-all",
+                    "flex flex-col items-center gap-2.5 p-3.5 rounded-2xl border transition-all text-left relative group",
                     isSelected 
-                      ? "bg-lab-accent/10 border-lab-accent text-white shadow-lg shadow-lab-accent/10" 
+                      ? "bg-lab-accent/10 border-lab-accent text-white shadow-lg shadow-lab-accent/10 scale-[1.02]" 
                       : "bg-lab-card border-lab-border text-lab-muted hover:border-lab-muted hover:text-lab-text"
                   )}
                 >
+                  {isResistor && (
+                    <span className="absolute top-2 right-2 text-[9px] bg-lab-accent/20 text-lab-accent px-1.5 py-0.5 rounded font-mono font-bold">
+                      {resistors.length === 1 ? resistors[0].value : `${resistors.length}x`}
+                    </span>
+                  )}
+                  {comp.id === 'ds18b20' && (
+                    <span className="absolute top-2 right-2 text-[8px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded font-bold uppercase">
+                      1-Wire
+                    </span>
+                  )}
                   <Icon className={cn("w-6 h-6", isSelected ? "text-lab-accent" : "text-lab-muted")} />
-                  <span className="text-[10px] font-bold text-center">{comp.name}</span>
+                  <span className="text-[10px] font-bold text-center leading-tight">{displayName}</span>
                 </button>
               );
             })}
           </div>
-        </div>
 
-        {/* Intent Input */}
-        <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4">
-          <div className="flex items-center gap-2 text-lab-accent">
-            <MessageSquare className="w-5 h-5" />
-            <h3 className="text-sm font-bold uppercase tracking-widest">Project Purpose</h3>
-          </div>
-          <textarea
-            value={intent}
-            onChange={(e) => {
-              setIntent(e.target.value);
-              setIsSaved(false);
-            }}
-            placeholder="Tell the program what is the purpose of connecting these components (e.g., 'I want to make an alarm that goes off when someone gets too close')..."
-            className="w-full bg-black/30 border border-lab-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-lab-accent h-24 transition-all"
-          />
-          <div className="flex justify-end">
-            <button
-              onClick={generateSchematic}
-              disabled={isGenerating || selectedPopularIds.length === 0 || !intent.trim()}
-              className="bg-lab-accent hover:bg-orange-600 disabled:opacity-50 text-white px-6 py-2 rounded-xl text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-lab-accent/20"
+          {/* Multi-Resistor Configuration Panel */}
+          {isResistorSelected && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-lab-card/90 border border-lab-accent/40 rounded-2xl p-5 space-y-4 shadow-sm"
             >
-              {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              {initialProject && !isGenerating ? 'Update Guide' : 'Generate Full Guide'}
-            </button>
+              {/* Header: Title and Quantity Stepper */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-lab-border/40 pb-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-lab-accent/15 border border-lab-accent/30 flex items-center justify-center text-lab-accent shrink-0">
+                    <Hash className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-white">Resistors Configuration</h4>
+                      <span className="text-[10px] bg-lab-accent/20 text-lab-accent px-2 py-0.5 rounded-md font-mono font-bold border border-lab-accent/30">
+                        {resistors.length} Resistor{resistors.length > 1 ? 's' : ''} Configured
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-lab-muted">
+                      Choose how many resistors you need and specify the resistance value for each one.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Resistor Count Stepper & Add Button */}
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center bg-black/50 border border-lab-border rounded-xl p-1">
+                    <button
+                      type="button"
+                      onClick={() => setResistorCount(resistors.length - 1)}
+                      disabled={resistors.length <= 1}
+                      className="w-7 h-7 flex items-center justify-center rounded-lg text-lab-muted hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent font-bold"
+                      title="Decrease resistor count"
+                    >
+                      -
+                    </button>
+                    <span className="px-3 text-xs font-mono font-bold text-white">
+                      {resistors.length}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setResistorCount(resistors.length + 1)}
+                      disabled={resistors.length >= 8}
+                      className="w-7 h-7 flex items-center justify-center rounded-lg text-lab-muted hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent font-bold"
+                      title="Increase resistor count"
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => addResistor(resistors.length === 1 ? '220Ω' : '10kΩ')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-lab-accent/15 hover:bg-lab-accent/25 text-lab-accent border border-lab-accent/40 rounded-xl text-xs font-bold transition-all"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Resistor</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Individual Resistors List */}
+              <div className="space-y-3">
+                {resistors.map((resistor, idx) => (
+                  <div 
+                    key={resistor.id}
+                    className="bg-black/40 border border-lab-border/70 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3 hover:border-lab-accent/30 transition-all"
+                  >
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      <span className="w-7 h-7 rounded-lg bg-lab-accent/20 border border-lab-accent/40 text-lab-accent font-mono font-bold text-xs flex items-center justify-center">
+                        {resistor.id}
+                      </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-white">{resistor.id} Value:</span>
+                          <span className="text-xs font-mono font-bold text-lab-accent bg-lab-accent/10 px-2 py-0.5 rounded border border-lab-accent/20">
+                            {resistor.value}
+                          </span>
+                        </div>
+                        {resistor.label && (
+                          <span className="text-[10px] text-lab-muted">{resistor.label}</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* Presets */}
+                      <div className="flex flex-wrap items-center gap-1 bg-black/50 p-1 rounded-xl border border-lab-border">
+                        {POPULAR_RESISTOR_PRESETS.map((preset) => (
+                          <button
+                            key={preset.value}
+                            type="button"
+                            onClick={() => updateResistorValue(idx, preset.value)}
+                            className={cn(
+                              "px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold transition-all whitespace-nowrap",
+                              resistor.value === preset.value
+                                ? "bg-lab-accent text-white shadow-sm"
+                                : "text-lab-muted hover:text-white hover:bg-white/5"
+                            )}
+                            title={preset.label}
+                          >
+                            {preset.value}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Custom Input */}
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          value={customInputs[idx] || ''}
+                          onChange={(e) => setCustomInputs(prev => ({ ...prev, [idx]: e.target.value }))}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') applyCustomResistorValue(idx, customInputs[idx] || '');
+                          }}
+                          placeholder="e.g. 560Ω"
+                          className="bg-black/60 border border-lab-border rounded-xl px-2 py-1 text-xs text-white font-mono w-20 focus:outline-none focus:border-lab-accent"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => applyCustomResistorValue(idx, customInputs[idx] || '')}
+                          className="px-2 py-1 bg-lab-card hover:bg-lab-accent hover:text-white border border-lab-border rounded-xl text-xs font-bold text-lab-muted transition-colors"
+                        >
+                          Set
+                        </button>
+                      </div>
+
+                      {/* Delete Button (if more than 1 resistor) */}
+                      {resistors.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => removeResistor(idx)}
+                          className="p-1.5 text-lab-muted hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors ml-1"
+                          title={`Remove ${resistor.id}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Helpful Recommendation Shortcuts */}
+              <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-lab-muted">
+                <span className="font-semibold text-white/80">Quick Recommendations:</span>
+                {isDS18B20Selected && !resistors.some(r => r.value === '4.7kΩ') && (
+                  <button
+                    type="button"
+                    onClick={() => addResistor('4.7kΩ', 'DS18B20 1-Wire Pull-up')}
+                    className="px-2 py-0.5 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/30 rounded-lg font-medium transition-colors"
+                  >
+                    + Add 4.7kΩ for DS18B20
+                  </button>
+                )}
+                {isLEDSelected && !resistors.some(r => r.value === '220Ω' || r.value === '330Ω') && (
+                  <button
+                    type="button"
+                    onClick={() => addResistor('220Ω', 'LED Current Limiter')}
+                    className="px-2 py-0.5 bg-lab-accent/15 hover:bg-lab-accent/25 text-lab-accent border border-lab-accent/30 rounded-lg font-medium transition-colors"
+                  >
+                    + Add 220Ω for LED
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => addResistor('10kΩ', 'Pull-Up / Sensor')}
+                  className="px-2 py-0.5 bg-white/5 hover:bg-white/10 text-lab-text border border-lab-border rounded-lg font-medium transition-colors"
+                >
+                  + Add 10kΩ for Buttons / Sensors
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Helper banner when DS18B20 is selected without any resistor */}
+          {isDS18B20Selected && !isResistorSelected && (
+            <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-2.5 flex items-center justify-between text-xs text-blue-300">
+              <div className="flex items-center gap-2">
+                <Thermometer className="w-4 h-4 text-blue-400 shrink-0" />
+                <span>
+                  <strong>DS18B20 Selected:</strong> Waterproof 1-Wire sensors require a <strong>4.7kΩ pull-up resistor</strong> between VCC and DATA.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedPopularIds(prev => [...prev, 'resistor']);
+                  setResistors([{ id: 'R1', value: '4.7kΩ', label: 'DS18B20 Pull-up' }]);
+                  setIsSaved(false);
+                }}
+                className="px-2.5 py-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-200 border border-blue-500/40 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap ml-2"
+              >
+                + Add 4.7kΩ Resistor
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Intent Input & Utilities */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-2 bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between text-lab-accent">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-5 h-5" />
+                <h3 className="text-sm font-bold uppercase tracking-widest">Project Purpose</h3>
+              </div>
+              <span className="text-[10px] text-lab-muted uppercase font-bold">Auto-persisted</span>
+            </div>
+            <textarea
+              value={intent}
+              onChange={(e) => {
+                setIntent(e.target.value);
+                setIsSaved(false);
+              }}
+              placeholder="Tell the program what is the purpose of connecting these components (e.g., 'Measure water temperature with the waterproof DS18B20 sensor and alert if it exceeds 30°C')..."
+              className="w-full bg-black/30 border border-lab-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-lab-accent h-24 transition-all leading-relaxed"
+            />
+            {generationError && (
+              <div className="bg-red-500/15 border border-red-500/30 text-red-300 rounded-xl p-3 text-xs flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span>{generationError}</span>
+                </div>
+                <button 
+                  type="button" 
+                  onClick={() => setGenerationError(null)} 
+                  className="px-2 py-0.5 hover:bg-white/10 rounded font-semibold text-xs text-red-200 transition-colors ml-2"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 font-medium">
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Self-Processing: Instant &amp; Offline</span>
+                </span>
+              </div>
+
+              <button
+                onClick={generateSchematic}
+                disabled={isGenerating || selectedPopularIds.length === 0 || !intent.trim()}
+                className="bg-lab-accent hover:bg-orange-600 disabled:opacity-50 text-white px-6 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-lab-accent/20"
+              >
+                {isGenerating ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Zap className="w-4 h-4 text-yellow-200" />
+                )}
+                {isGenerating 
+                  ? 'Processing Circuit...' 
+                  : (initialProject ? '⚡ Update Circuit (Self-Processing)' : '⚡ Process Guide (Self-Processing)')}
+              </button>
+            </div>
+          </div>
+
+          <div className="lg:col-span-1">
+            <Stopwatch />
           </div>
         </div>
 
-        {/* AI Results */}
+        {/* Interactive Wiring & Schematic Engine */}
         <AnimatePresence>
           {(aiResult || isGenerating) && (
             <motion.div
@@ -223,18 +894,24 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
               animate={{ opacity: 1, y: 0 }}
               className="space-y-6"
             >
-              {/* Visual Debugger & Wiring */}
+              {/* Visual Debugger & Wiring Configuration */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 bg-black/40 border border-lab-border rounded-2xl p-8 flex flex-col items-center justify-center min-h-[400px] relative overflow-hidden">
-                  <div className="absolute top-4 left-4 text-[10px] font-bold text-lab-accent uppercase tracking-widest flex items-center gap-2">
-                    <Sparkles className="w-3 h-3" />
-                    Visual Debugger
+                {/* SVG Visual Debugger */}
+                <div className="lg:col-span-2 bg-black/40 border border-lab-border rounded-2xl p-8 flex flex-col items-center justify-center min-h-[420px] relative overflow-hidden">
+                  <div className="absolute top-4 left-4 text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
+                      <Zap className="w-3 h-3 text-yellow-400" />
+                      Self-Processed Circuit
+                    </span>
+                  </div>
+                  <div className="absolute top-4 right-4 text-[10px] text-lab-muted font-mono">
+                    Live Connections: {aiResult?.connections.length || 0}
                   </div>
 
                   {isGenerating ? (
                     <div className="flex flex-col items-center gap-4">
                       <Loader2 className="w-10 h-10 text-lab-accent animate-spin" />
-                      <p className="text-sm text-lab-muted animate-pulse">Designing your project...</p>
+                      <p className="text-sm text-lab-muted animate-pulse">Designing and routing your project...</p>
                     </div>
                   ) : (
                     <div className="relative w-full max-w-lg aspect-video flex items-center justify-center">
@@ -242,62 +919,252 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
                         <rect x="200" y="100" width="100" height="100" rx="8" className="fill-lab-card stroke-lab-accent stroke-2" />
                         <text x="250" y="155" textAnchor="middle" className="fill-lab-accent text-[12px] font-bold">ARDUINO UNO</text>
                         
-                        {selectedPopularIds.map((id, idx) => {
-                          const comp = POPULAR_COMPONENTS.find(c => c.id === id)!;
-                          const angle = (idx / selectedPopularIds.length) * 2 * Math.PI;
-                          const r = 160;
-                          const cx = 250 + r * Math.cos(angle);
-                          const cy = 150 + r * Math.sin(angle);
-                          
-                          return (
-                            <g key={id}>
-                              {aiResult?.connections.filter(conn => conn.compId === id).map((conn, cIdx) => (
-                                <motion.path
-                                  key={cIdx}
-                                  d={`M ${cx} ${cy} L 250 150`}
-                                  stroke="var(--color-lab-accent)"
-                                  strokeWidth="1"
-                                  strokeDasharray="4 4"
-                                  initial={{ pathLength: 0 }}
-                                  animate={{ pathLength: 1 }}
-                                  className="opacity-40"
-                                />
-                              ))}
-                              <rect x={cx - 30} y={cy - 30} width="60" height="60" rx="8" className="fill-lab-card stroke-lab-border" />
-                              <text x={cx} y={cy + 5} textAnchor="middle" className="fill-white text-[8px] font-bold">{comp.name}</text>
-                            </g>
-                          );
-                        })}
+                        {/* Render Nodes for Selected Components */}
+                        {(() => {
+                          // Flatten components so each resistor gets its own node if multiple
+                          const displayNodes: Array<{ id: string; name: string }> = [];
+                          selectedPopularIds.forEach(id => {
+                            if (id === 'resistor' || id === 'resistor-330') {
+                              resistors.forEach(r => {
+                                displayNodes.push({ id: r.id, name: `${r.id}: ${r.value}` });
+                              });
+                            } else {
+                              const comp = POPULAR_COMPONENTS.find(c => c.id === id);
+                              if (comp) displayNodes.push({ id: comp.id, name: comp.name });
+                            }
+                          });
+
+                          return displayNodes.map((node, idx) => {
+                            const angle = (idx / displayNodes.length) * 2 * Math.PI;
+                            const r = 160;
+                            const cx = 250 + r * Math.cos(angle);
+                            const cy = 150 + r * Math.sin(angle);
+                            
+                            const compConns = aiResult?.connections.filter(conn => 
+                              conn.compId.toLowerCase() === node.id.toLowerCase() ||
+                              (node.id.startsWith('R') && conn.compId.toLowerCase().includes('resistor')) ||
+                              (node.id === 'ds18b20' && (conn.compId.toLowerCase().includes('ds18b20') || conn.compId.toLowerCase().includes('temp')))
+                            ) || [];
+
+                            return (
+                              <g key={`${node.id}-${idx}`}>
+                                {compConns.map((_, cIdx) => (
+                                  <motion.path
+                                    key={cIdx}
+                                    d={`M ${cx} ${cy} L 250 150`}
+                                    stroke="var(--color-lab-accent)"
+                                    strokeWidth="1.5"
+                                    strokeDasharray="4 4"
+                                    initial={{ pathLength: 0 }}
+                                    animate={{ pathLength: 1 }}
+                                    className="opacity-60"
+                                  />
+                                ))}
+                                <rect x={cx - 38} y={cy - 22} width="76" height="44" rx="8" className="fill-lab-card stroke-lab-border" />
+                                <text x={cx} y={cy + 4} textAnchor="middle" className="fill-white text-[7.5px] font-bold">{node.name}</text>
+                              </g>
+                            );
+                          });
+                        })()}
                       </svg>
                     </div>
                   )}
                 </div>
 
-                <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4 overflow-y-auto max-h-[400px]">
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-lab-accent">Wiring & Breadboard</h3>
-                  <div className="space-y-3">
-                    {aiResult?.connections.map((conn, idx) => (
-                      <div key={idx} className="bg-black/20 rounded-xl p-3 border border-lab-border/50 space-y-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex-1">
-                            <div className="text-[10px] text-lab-muted uppercase font-bold">{conn.compId}</div>
-                            <div className="text-xs text-white">{conn.compPin}</div>
+                {/* Interactive Wiring & Breadboard Section */}
+                <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4 overflow-y-auto max-h-[420px] flex flex-col justify-between">
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-sm font-bold uppercase tracking-widest text-lab-accent">Wiring & Breadboard</h3>
+                        <p className="text-[10px] text-lab-muted">Click any pin to modify • Auto-saves to localStorage</p>
+                      </div>
+                      <button
+                        onClick={() => setShowAddWireModal(true)}
+                        className="flex items-center gap-1 text-[11px] font-bold text-lab-accent hover:text-orange-400 bg-lab-accent/10 px-2.5 py-1 rounded-lg border border-lab-accent/30 transition-all"
+                        title="Add a custom wire connection"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Add Wire
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {aiResult?.connections.map((conn, idx) => (
+                        <div key={idx} className="bg-black/30 rounded-xl p-3 border border-lab-border/60 space-y-2 hover:border-lab-accent/40 transition-colors group">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] text-lab-muted uppercase font-bold truncate">{conn.compId}</div>
+                              <div className="text-xs text-white font-medium truncate">{conn.compPin}</div>
+                            </div>
+
+                            <ArrowRight className="w-3.5 h-3.5 text-lab-accent shrink-0" />
+
+                            <div className="flex-1 text-right min-w-0">
+                              <div className="text-[10px] text-lab-muted uppercase font-bold">Arduino Pin</div>
+                              {editingPinIdx === idx ? (
+                                <div className="flex items-center justify-end gap-1 mt-0.5">
+                                  <select
+                                    value={conn.arduinoPin}
+                                    onChange={(e) => handleUpdatePin(idx, e.target.value)}
+                                    className="bg-black border border-lab-accent text-lab-accent text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none"
+                                    autoFocus
+                                    onBlur={() => setEditingPinIdx(null)}
+                                  >
+                                    {STANDARD_ARDUINO_PINS.map(pin => (
+                                      <option key={pin} value={pin}>{pin}</option>
+                                    ))}
+                                    {!STANDARD_ARDUINO_PINS.includes(conn.arduinoPin) && (
+                                      <option value={conn.arduinoPin}>{conn.arduinoPin}</option>
+                                    )}
+                                  </select>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => setEditingPinIdx(idx)}
+                                  className="inline-flex items-center gap-1 text-xs text-lab-accent font-mono font-bold bg-lab-accent/15 px-2 py-0.5 rounded border border-lab-accent/30 hover:bg-lab-accent/25 transition-all"
+                                  title="Click to modify Arduino pin"
+                                >
+                                  {conn.arduinoPin}
+                                  <Edit2 className="w-2.5 h-2.5 opacity-60 group-hover:opacity-100" />
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Remove connection button */}
+                            <button
+                              onClick={() => handleDeleteConnection(idx)}
+                              className="opacity-0 group-hover:opacity-100 p-1 text-lab-muted hover:text-red-400 transition-opacity"
+                              title="Delete this connection"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
-                          <ArrowRight className="w-4 h-4 text-lab-accent" />
-                          <div className="flex-1 text-right">
-                            <div className="text-[10px] text-lab-muted uppercase font-bold">Arduino Pin</div>
-                            <div className="text-xs text-lab-accent font-mono">{conn.arduinoPin}</div>
+
+                          {/* Breadboard coordinates (editable) */}
+                          <div className="pt-2 border-t border-lab-border/30 flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 text-[10px] text-lab-muted flex-1 min-w-0">
+                              <Grid className="w-3 h-3 text-lab-muted shrink-0" />
+                              {editingCoordsIdx === idx ? (
+                                <input
+                                  type="text"
+                                  value={customCoordsInput}
+                                  onChange={(e) => setCustomCoordsInput(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleUpdateCoords(idx, customCoordsInput);
+                                    if (e.key === 'Escape') setEditingCoordsIdx(null);
+                                  }}
+                                  onBlur={() => handleUpdateCoords(idx, customCoordsInput)}
+                                  placeholder="e.g. Row A, Col 12"
+                                  className="bg-black/50 border border-lab-accent text-white px-1.5 py-0.5 rounded text-[10px] w-full"
+                                  autoFocus
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    setEditingCoordsIdx(idx);
+                                    setCustomCoordsInput(conn.breadboardCoords || '');
+                                  }}
+                                  className="text-[10px] text-left hover:text-white truncate"
+                                  title="Click to edit breadboard coordinate"
+                                >
+                                  Breadboard: <span className="text-white font-bold">{conn.breadboardCoords || 'None (click to set)'}</span>
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </div>
-                        {conn.breadboardCoords && (
-                          <div className="pt-2 border-t border-lab-border/30 flex items-center gap-2">
-                            <Grid className="w-3 h-3 text-lab-muted" />
-                            <span className="text-[10px] text-lab-muted">Breadboard: <span className="text-white font-bold">{conn.breadboardCoords}</span></span>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                      ))}
+
+                      {(!aiResult?.connections || aiResult.connections.length === 0) && (
+                        <p className="text-xs text-lab-muted text-center py-4">No wiring connections yet.</p>
+                      )}
+                    </div>
                   </div>
+
+                  {/* Add Wire Dialog */}
+                  <AnimatePresence>
+                    {showAddWireModal && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="bg-black/50 border border-lab-accent/50 rounded-xl p-3.5 space-y-3 mt-3"
+                      >
+                        <div className="flex items-center justify-between text-xs font-bold text-lab-accent">
+                          <span>Add Wire Connection</span>
+                          <button onClick={() => setShowAddWireModal(false)} className="text-lab-muted hover:text-white">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <form onSubmit={handleAddWire} className="space-y-2 text-xs">
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[10px] text-lab-muted block mb-0.5">Component ID</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="e.g. ds18b20, R1, resistor"
+                                value={newWireCompId}
+                                onChange={(e) => setNewWireCompId(e.target.value)}
+                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-lab-muted block mb-0.5">Component Pin</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="e.g. DATA, VCC, Pin 1"
+                                value={newWireCompPin}
+                                onChange={(e) => setNewWireCompPin(e.target.value)}
+                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-white text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[10px] text-lab-muted block mb-0.5">Arduino Pin</label>
+                              <select
+                                value={newWireArduinoPin}
+                                onChange={(e) => setNewWireArduinoPin(e.target.value)}
+                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-lab-accent font-mono text-xs"
+                              >
+                                {STANDARD_ARDUINO_PINS.map(pin => (
+                                  <option key={pin} value={pin}>{pin}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-lab-muted block mb-0.5">Breadboard (Optional)</label>
+                              <input
+                                type="text"
+                                placeholder="e.g. Row C, Col 15"
+                                value={newWireCoords}
+                                onChange={(e) => setNewWireCoords(e.target.value)}
+                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-white text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => setShowAddWireModal(false)}
+                              className="px-2.5 py-1 text-[11px] text-lab-muted hover:text-white"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="submit"
+                              className="px-3 py-1 bg-lab-accent hover:bg-orange-600 text-white rounded text-[11px] font-bold transition-colors"
+                            >
+                              Add & Auto-Save
+                            </button>
+                          </div>
+                        </form>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               </div>
 
@@ -305,14 +1172,14 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
               {!isGenerating && aiResult && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   {/* Wires & Breadboard Guide */}
-                  <div className="space-y-6">
+                  <div className="lg:col-span-3 space-y-6">
                     <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4">
                       <div className="flex items-center gap-2 text-lab-accent">
                         <ClipboardList className="w-5 h-5" />
                         <h3 className="text-sm font-bold uppercase tracking-widest">Wire Requirements</h3>
                       </div>
                       <div className="space-y-3">
-                        {aiResult.wires.map((wire, idx) => (
+                        {aiResult.wires?.map((wire, idx) => (
                           <div key={idx} className="bg-black/20 rounded-xl p-4 border border-lab-border/50">
                             <div className="flex justify-between items-center mb-2">
                               <span className="text-xs font-bold text-white">{wire.type}</span>
@@ -336,22 +1203,62 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
                   </div>
 
                   {/* Arduino Code */}
-                  <div className="lg:col-span-2 bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-lab-accent">
-                        <Code className="w-5 h-5" />
-                        <h3 className="text-sm font-bold uppercase tracking-widest">Arduino Code</h3>
+                  <div className="lg:col-span-3 space-y-6">
+                    <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-lab-accent">
+                          <Code className="w-5 h-5" />
+                          <h3 className="text-sm font-bold uppercase tracking-widest">Arduino Code</h3>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <button 
+                            onClick={explainCode}
+                            disabled={isExplainingCode}
+                            className="text-[10px] font-bold text-lab-accent hover:text-orange-400 uppercase transition-colors flex items-center gap-1 disabled:opacity-50"
+                          >
+                            {isExplainingCode ? <Loader2 className="w-3 h-3 animate-spin" /> : <BookOpen className="w-3 h-3" />}
+                            {aiResult.codeExplanation ? 'Re-explain' : 'Explain Code'}
+                          </button>
+                          <button 
+                            onClick={() => navigator.clipboard.writeText(aiResult.code)}
+                            className="text-[10px] font-bold text-lab-muted hover:text-white uppercase transition-colors"
+                          >
+                            Copy Code
+                          </button>
+                        </div>
                       </div>
-                      <button 
-                        onClick={() => navigator.clipboard.writeText(aiResult.code)}
-                        className="text-[10px] font-bold text-lab-muted hover:text-white uppercase transition-colors"
-                      >
-                        Copy Code
-                      </button>
+                      <pre className="bg-black/40 rounded-xl p-5 text-xs font-mono text-lab-text overflow-y-auto max-h-[600px] border border-lab-border leading-relaxed whitespace-pre-wrap break-words">
+                        <code>{aiResult.code}</code>
+                      </pre>
                     </div>
-                    <pre className="bg-black/40 rounded-xl p-5 text-xs font-mono text-lab-text overflow-x-auto border border-lab-border leading-relaxed">
-                      <code>{aiResult.code}</code>
-                    </pre>
+
+                    {/* Code Explanation */}
+                    <AnimatePresence>
+                      {(isExplainingCode || aiResult.codeExplanation) && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4 overflow-hidden"
+                        >
+                          <div className="flex items-center gap-2 text-lab-accent">
+                            <BookOpen className="w-5 h-5" />
+                            <h3 className="text-sm font-bold uppercase tracking-widest">Code Explanation</h3>
+                          </div>
+                          
+                          {isExplainingCode ? (
+                            <div className="flex items-center gap-3 py-4 text-lab-muted">
+                              <Loader2 className="w-4 h-4 animate-spin text-lab-accent" />
+                              <span className="text-xs animate-pulse italic">Analyzing code logic and pin routing...</span>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-lab-muted leading-relaxed whitespace-pre-wrap prose prose-invert prose-xs max-w-none">
+                              {aiResult.codeExplanation}
+                            </div>
+                          )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 </div>
               )}

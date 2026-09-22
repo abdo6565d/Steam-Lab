@@ -53,11 +53,21 @@ export interface CustomConnection {
   breadboardCoords?: string;
 }
 
-export interface AIResult {
+export interface CircuitResult {
   connections: CustomConnection[];
   code: string;
   wires: WireSuggestion[];
-  breadboardGuide?: string; // General instructions for breadboard layout
+  breadboardGuide?: string; // Step-by-step instructions for breadboard layout
+  codeExplanation?: string; // Self-processed explanation of the code
+}
+
+// Alias for compatibility
+export type AIResult = CircuitResult;
+
+export interface ResistorItem {
+  id: string;
+  value: string;
+  label?: string;
 }
 
 export interface SavedProject {
@@ -67,6 +77,8 @@ export interface SavedProject {
   selectedComponentIds: string[];
   intent: string;
   result: AIResult;
+  resistorValue?: string;
+  resistors?: ResistorItem[];
 }
 
 export interface PopularComponent {
@@ -91,14 +103,26 @@ export const POPULAR_COMPONENTS: PopularComponent[] = [
     extraParts: ['220Ω Resistor']
   },
   {
-    id: 'resistor-330',
-    name: '330Ω Resistor',
+    id: 'resistor',
+    name: 'Resistor',
     icon: 'Hash',
-    description: 'Current limiting resistor for LEDs and small circuits.',
+    description: 'Adjustable resistor for current limiting or pull-up/pull-down (e.g. 220Ω, 1kΩ, 4.7kΩ, 10kΩ).',
     wiring: [
-      { componentPin: 'Side A', arduinoPin: 'Any' },
-      { componentPin: 'Side B', arduinoPin: 'Any' }
+      { componentPin: 'Side A', arduinoPin: 'Circuit Node / Pin' },
+      { componentPin: 'Side B', arduinoPin: 'Circuit Node / Pin' }
     ]
+  },
+  {
+    id: 'ds18b20',
+    name: 'DS18B20 Temp',
+    icon: 'Thermometer',
+    description: 'Waterproof digital temperature sensor using 1-Wire protocol. Range: -55°C to +125°C.',
+    wiring: [
+      { componentPin: 'Red (VCC)', arduinoPin: '5V (or 3.3V)' },
+      { componentPin: 'Black (GND)', arduinoPin: 'GND' },
+      { componentPin: 'Yellow/Signal (DATA)', arduinoPin: 'Digital Pin (e.g., D2)', note: 'Requires 4.7kΩ pull-up resistor to 5V' }
+    ],
+    extraParts: ['4.7kΩ Pull-Up Resistor']
   },
   {
     id: 'breadboard',
@@ -247,6 +271,17 @@ export const POPULAR_COMPONENTS: PopularComponent[] = [
     ]
   },
   {
+    id: 'push-button',
+    name: 'Push Button',
+    icon: 'CircleDot',
+    description: 'Simple momentary switch for user input.',
+    wiring: [
+      { componentPin: 'Side A', arduinoPin: 'Digital Pin (e.g., D2)' },
+      { componentPin: 'Side B', arduinoPin: 'GND' }
+    ],
+    extraParts: ['10kΩ Pull-up/down Resistor (if not using internal)']
+  },
+  {
     id: 'laser',
     name: 'Laser Module',
     icon: 'Target',
@@ -290,25 +325,17 @@ export const POPULAR_COMPONENTS: PopularComponent[] = [
     ]
   },
   {
-    id: 'arduino-uno',
-    name: 'Arduino Uno',
-    icon: 'Cpu',
-    description: 'The most popular microcontroller for beginners.',
+    id: 'hc-05',
+    name: 'Bluetooth HC-05',
+    icon: 'Bluetooth',
+    description: 'Wireless serial communication module.',
     wiring: [
-      { componentPin: 'USB', arduinoPin: 'Computer' },
-      { componentPin: 'Barrel Jack', arduinoPin: '7-12V Power' }
-    ]
-  },
-  {
-    id: 'esp32',
-    name: 'ESP32',
-    icon: 'Wifi',
-    description: 'Powerful microcontroller with built-in Wi-Fi and Bluetooth.',
-    wiring: [
-      { componentPin: 'VCC', arduinoPin: '3.3V' },
+      { componentPin: 'VCC', arduinoPin: '5V' },
       { componentPin: 'GND', arduinoPin: 'GND' },
-      { componentPin: 'EN', arduinoPin: 'Reset Button' }
-    ]
+      { componentPin: 'TX', arduinoPin: 'RX (D0 or SoftwareSerial)' },
+      { componentPin: 'RX', arduinoPin: 'TX (D1 or SoftwareSerial)', note: 'Use voltage divider for 3.3V logic' }
+    ],
+    extraParts: ['1kΩ Resistor', '2kΩ Resistor (Voltage Divider)']
   },
   {
     id: 'dht11',

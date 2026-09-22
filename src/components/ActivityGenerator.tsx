@@ -1,11 +1,9 @@
 import React, { useState } from 'react';
-import { GoogleGenAI } from "@google/genai";
-import { Rocket, Loader2, CheckCircle2, Clock, Trophy, Sparkles } from 'lucide-react';
+import { Rocket, Loader2, CheckCircle2, Clock, Trophy, AlertCircle, Zap } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from 'motion/react';
 import { SavedProject, POPULAR_COMPONENTS } from '../constants';
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+import { generateActivitiesLocal } from '../lib/selfProcessingEngine';
 
 interface ActivityGeneratorProps {
   currentProject?: SavedProject | null;
@@ -13,33 +11,22 @@ interface ActivityGeneratorProps {
 
 export default function ActivityGenerator({ currentProject }: ActivityGeneratorProps) {
   const [loading, setLoading] = useState(false);
-  const [activities, setActivities] = useState<string | null>(null);
+  const [activities, setActivities] = useState<string | null>(() => {
+    // Generate initial activities locally if project exists
+    return currentProject ? generateActivitiesLocal(currentProject) : null;
+  });
+  const [error, setError] = useState<string | null>(null);
 
   const generateActivities = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const projectContext = currentProject 
-        ? `The student is currently working on a project with components: ${currentProject.selectedComponentIds.map(id => POPULAR_COMPONENTS.find(c => c.id === id)?.name).join(', ')}. 
-           The project intent is: "${currentProject.intent}".`
-        : "The student is looking for general STEAM project ideas.";
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `You are a STEAM curriculum designer. ${projectContext}
-        
-        Generate a "Level-Up" activity guide for this student.
-        
-        Provide 3 tiers of difficulty:
-        1. **Tinkerer (10 mins)**: A small modification or "what if" scenario.
-        2. **Engineer (20 mins)**: A structural or logical improvement requiring new components or code logic.
-        3. **Inventor (Open-ended)**: A creative challenge to solve a real-world problem using the current setup.
-        
-        Format the output in clear Markdown with bold headers and bullet points. Make the activities highly relevant to the current project if provided.`,
-      });
-
-      setActivities(response.text || "");
-    } catch (error) {
-      console.error("Activity generation failed:", error);
+      await new Promise(r => setTimeout(r, 80)); // Snappy UX feedback
+      const localMarkdown = generateActivitiesLocal(currentProject);
+      setActivities(localMarkdown);
+    } catch (err: any) {
+      console.error("Activity generation failed:", err);
+      setError(err?.message || "Failed to generate activities.");
     } finally {
       setLoading(false);
     }
@@ -47,23 +34,48 @@ export default function ActivityGenerator({ currentProject }: ActivityGeneratorP
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold flex items-center gap-2">
             <Rocket className="text-lab-accent w-5 h-5" />
             Level-Up Generator
           </h2>
-          <p className="text-sm text-lab-muted">Instant pedagogical extensions for fast learners</p>
+          <p className="text-sm text-lab-muted">Instant pedagogical extension activities for tinkers, engineers, and inventors</p>
         </div>
-        <button
-          onClick={generateActivities}
-          disabled={loading}
-          className="bg-lab-accent hover:bg-orange-600 disabled:opacity-50 text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-lab-accent/20"
-        >
-          {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-          I'm Done—What's Next?
-        </button>
+
+        <div className="flex items-center gap-3">
+          {/* Self-Processing Status Badge */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 font-semibold text-xs shadow-sm">
+            <Zap className="w-3.5 h-3.5 text-yellow-400" />
+            <span>Self-Processing Curriculum</span>
+          </div>
+
+          <button
+            onClick={generateActivities}
+            disabled={loading}
+            className="bg-lab-accent hover:bg-orange-600 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-lab-accent/20 text-sm shrink-0"
+          >
+            {loading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Zap className="w-4 h-4 text-yellow-200" />
+            )}
+            ⚡ Level-Up Challenges
+          </button>
+        </div>
       </div>
+
+      {error && (
+        <div className="bg-red-500/15 border border-red-500/30 text-red-300 rounded-xl p-3.5 text-xs flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+            <span>{error}</span>
+          </div>
+          <button onClick={() => setError(null)} className="px-2 py-0.5 hover:bg-white/10 rounded font-semibold text-xs text-red-200">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <AnimatePresence>
         {activities && (

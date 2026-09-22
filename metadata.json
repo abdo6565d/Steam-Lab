@@ -1,5 +1,8 @@
 {
   "name": "STEAM Lab",
   "description": "A high-tech lab tool for STEAM students and instructors to reduce bottlenecking with visual debugging, real-world context, and activity generation.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
