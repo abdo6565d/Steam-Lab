@@ -56,12 +56,33 @@ export interface CustomConnection {
   breadboardCoords?: string;
 }
 
+export interface SequentialWiringStep {
+  id: string;
+  stepNumber: number;
+  instruction: string;
+  fromPoint: string;
+  toPoint: string;
+  wireType?: string;
+  details?: string;
+  completed?: boolean;
+}
+
+export interface ComponentSequentialGuide {
+  componentId: string;
+  componentName: string;
+  location: 'breadboard' | 'direct';
+  locationDetails: string;
+  overview: string;
+  steps: SequentialWiringStep[];
+}
+
 export interface CircuitResult {
   connections: CustomConnection[];
   code: string;
   wires: WireSuggestion[];
   breadboardGuide?: string; // Step-by-step instructions for breadboard layout
   codeExplanation?: string; // Self-processed explanation of the code
+  sequentialGuides?: ComponentSequentialGuide[]; // Serial step-by-step physical connection guide per component
 }
 
 // Alias for compatibility

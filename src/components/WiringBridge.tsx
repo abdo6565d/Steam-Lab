@@ -12,6 +12,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import Stopwatch from './Stopwatch';
+import SequentialWiringWalkthrough from './SequentialWiringWalkthrough';
 import { AlertCircle } from 'lucide-react';
 
 const ICON_MAP: Record<string, any> = {
@@ -82,18 +83,6 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(true);
   const [draftRestoredBanner, setDraftRestoredBanner] = useState(false);
-
-  // Connection editing state
-  const [editingPinIdx, setEditingPinIdx] = useState<number | null>(null);
-  const [customPinInput, setCustomPinInput] = useState('');
-  const [editingCoordsIdx, setEditingCoordsIdx] = useState<number | null>(null);
-  const [customCoordsInput, setCustomCoordsInput] = useState('');
-  const [showAddWireModal, setShowAddWireModal] = useState(false);
-  const [newWireCompId, setNewWireCompId] = useState('');
-  const [newWireCompPin, setNewWireCompPin] = useState('');
-  const [newWireArduinoPin, setNewWireArduinoPin] = useState('D2');
-  const [newWireConnectionMode, setNewWireConnectionMode] = useState<ConnectionMode>('direct');
-  const [newWireCoords, setNewWireCoords] = useState('');
 
   const isInitialMount = useRef(true);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -461,100 +450,6 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
     } finally {
       setIsExplainingCode(false);
     }
-  };
-
-  // Direct Wiring Modification Functions
-  const handleUpdatePin = (index: number, newPin: string) => {
-    if (!aiResult) return;
-    const updated = [...aiResult.connections];
-    updated[index] = { ...updated[index], arduinoPin: newPin };
-    const newAiResult = { ...aiResult, connections: updated };
-    setAiResult(newAiResult);
-    setIsSaved(false);
-    setEditingPinIdx(null);
-  };
-
-  const handleUpdateCoords = (index: number, newCoords: string) => {
-    if (!aiResult) return;
-    const updated = [...aiResult.connections];
-    const coords = newCoords.trim() || undefined;
-    updated[index] = { 
-      ...updated[index], 
-      breadboardCoords: coords,
-      connectionMode: coords ? 'breadboard' : 'direct'
-    };
-    const newAiResult = { ...aiResult, connections: updated };
-    setAiResult(newAiResult);
-    setIsSaved(false);
-    setEditingCoordsIdx(null);
-  };
-
-  const handleToggleConnectionMode = (index: number) => {
-    if (!aiResult) return;
-    const current = aiResult.connections[index];
-    const newMode: ConnectionMode = (current.connectionMode === 'direct' || !current.breadboardCoords) ? 'breadboard' : 'direct';
-
-    let newCoords: string | undefined = undefined;
-    if (newMode === 'breadboard') {
-      const rule = COMPONENT_RULES[current.compId.toLowerCase()];
-      const matchingPin = rule?.pins.find(p => p.pinName.toLowerCase() === current.compPin.toLowerCase());
-      newCoords = matchingPin ? `${matchingPin.breadboardRow}, Col ${matchingPin.breadboardCol}` : 'Row A, Col 12';
-    }
-
-    const updated = [...aiResult.connections];
-    updated[index] = {
-      ...current,
-      connectionMode: newMode,
-      breadboardCoords: newCoords
-    };
-
-    const newConnectionModes = {
-      ...componentConnectionModes,
-      [current.compId.toLowerCase()]: newMode
-    };
-    setComponentConnectionModes(newConnectionModes);
-
-    const newAiResult = { ...aiResult, connections: updated };
-    setAiResult(newAiResult);
-    setIsSaved(false);
-    executeAutoSave(projectId, projectName, intent, selectedPopularIds, newAiResult, resistors, newConnectionModes);
-  };
-
-  const handleDeleteConnection = (index: number) => {
-    if (!aiResult) return;
-    const updated = aiResult.connections.filter((_, i) => i !== index);
-    const newAiResult = { ...aiResult, connections: updated };
-    setAiResult(newAiResult);
-    setIsSaved(false);
-  };
-
-  const handleAddWire = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!aiResult || !newWireCompId.trim() || !newWireCompPin.trim() || !newWireArduinoPin.trim()) return;
-
-    const isDirect = newWireConnectionMode === 'direct';
-    const newConnection: CustomConnection = {
-      compId: newWireCompId.trim(),
-      compPin: newWireCompPin.trim(),
-      arduinoPin: newWireArduinoPin.trim(),
-      connectionMode: newWireConnectionMode,
-      breadboardCoords: isDirect ? undefined : (newWireCoords.trim() || 'Row A, Col 10')
-    };
-
-    const newAiResult = {
-      ...aiResult,
-      connections: [...aiResult.connections, newConnection]
-    };
-
-    setAiResult(newAiResult);
-    setIsSaved(false);
-    setShowAddWireModal(false);
-    setNewWireCompId('');
-    setNewWireCompPin('');
-    setNewWireArduinoPin('D2');
-    setNewWireCoords('');
-    setNewWireConnectionMode('direct');
-    executeAutoSave(projectId, projectName, intent, selectedPopularIds, newAiResult, resistors, componentConnectionModes);
   };
 
   const handleManualSave = () => {
@@ -1142,385 +1037,16 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
               animate={{ opacity: 1, y: 0 }}
               className="space-y-6"
             >
-              {/* Visual Debugger & Wiring Configuration */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* SVG Visual Debugger */}
-                <div className="lg:col-span-2 bg-black/40 border border-lab-border rounded-2xl p-8 flex flex-col items-center justify-center min-h-[420px] relative overflow-hidden">
-                  <div className="absolute top-4 left-4 text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
-                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
-                      <Zap className="w-3 h-3 text-yellow-400" />
-                      Self-Processed Circuit
-                    </span>
+              {/* Loading State during synthesis */}
+              {isGenerating && (
+                <div className="bg-lab-card border border-lab-border rounded-2xl p-12 flex flex-col items-center justify-center gap-4 text-center">
+                  <Loader2 className="w-10 h-10 text-lab-accent animate-spin" />
+                  <div>
+                    <h3 className="text-sm font-bold text-white uppercase tracking-wider">Synthesizing Project</h3>
+                    <p className="text-xs text-lab-muted mt-1">Generating sequential wiring steps and Arduino code...</p>
                   </div>
-                  <div className="absolute top-4 right-4 text-[10px] text-lab-muted font-mono">
-                    Live Connections: {aiResult?.connections.length || 0}
-                  </div>
-
-                  {isGenerating ? (
-                    <div className="flex flex-col items-center gap-4">
-                      <Loader2 className="w-10 h-10 text-lab-accent animate-spin" />
-                      <p className="text-sm text-lab-muted animate-pulse">Designing and routing your project...</p>
-                    </div>
-                  ) : (
-                    <div className="relative w-full max-w-lg aspect-video flex items-center justify-center">
-                      <svg viewBox="0 0 500 300" className="w-full h-full">
-                        <rect x="200" y="100" width="100" height="100" rx="8" className="fill-lab-card stroke-lab-accent stroke-2" />
-                        <text x="250" y="155" textAnchor="middle" className="fill-lab-accent text-[12px] font-bold">ARDUINO UNO</text>
-                        
-                        {/* Render Nodes for Selected Components */}
-                        {(() => {
-                          // Flatten components so each resistor gets its own node if multiple
-                          const displayNodes: Array<{ id: string; name: string }> = [];
-                          selectedPopularIds.forEach(id => {
-                            if (id === 'resistor' || id === 'resistor-330') {
-                              resistors.forEach(r => {
-                                displayNodes.push({ id: r.id, name: `${r.id}: ${r.value}` });
-                              });
-                            } else {
-                              const comp = POPULAR_COMPONENTS.find(c => c.id === id);
-                              if (comp) displayNodes.push({ id: comp.id, name: comp.name });
-                            }
-                          });
-
-                          return displayNodes.map((node, idx) => {
-                            const angle = (idx / displayNodes.length) * 2 * Math.PI;
-                            const r = 160;
-                            const cx = 250 + r * Math.cos(angle);
-                            const cy = 150 + r * Math.sin(angle);
-                            
-                            const compConns = aiResult?.connections.filter(conn => 
-                              conn.compId.toLowerCase() === node.id.toLowerCase() ||
-                              (node.id.startsWith('R') && conn.compId.toLowerCase().includes('resistor')) ||
-                              (node.id === 'ds18b20' && (conn.compId.toLowerCase().includes('ds18b20') || conn.compId.toLowerCase().includes('temp')))
-                            ) || [];
-
-                            const isNodeDirect = (componentConnectionModes[node.id.toLowerCase()] === 'direct') ||
-                              (compConns.length > 0 && compConns.every(c => c.connectionMode === 'direct'));
-
-                            return (
-                              <g key={`${node.id}-${idx}`}>
-                                {compConns.map((_, cIdx) => (
-                                  <motion.path
-                                    key={cIdx}
-                                    d={`M ${cx} ${cy} L 250 150`}
-                                    stroke={isNodeDirect ? "#f59e0b" : "#38bdf8"}
-                                    strokeWidth={isNodeDirect ? "2" : "1.75"}
-                                    strokeDasharray={isNodeDirect ? undefined : "5 4"}
-                                    initial={{ pathLength: 0 }}
-                                    animate={{ pathLength: 1 }}
-                                    className="opacity-80"
-                                  />
-                                ))}
-                                <rect 
-                                  x={cx - 40} 
-                                  y={cy - 24} 
-                                  width="80" 
-                                  height="48" 
-                                  rx="8" 
-                                  className={cn(
-                                    "fill-lab-card stroke-2",
-                                    isNodeDirect ? "stroke-amber-500/70" : "stroke-blue-500/70"
-                                  )} 
-                                />
-                                <text x={cx} y={cy - 3} textAnchor="middle" className="fill-white text-[8px] font-bold">{node.name}</text>
-                                <text 
-                                  x={cx} 
-                                  y={cy + 13} 
-                                  textAnchor="middle" 
-                                  className={cn(
-                                    "text-[7px] font-mono font-bold uppercase",
-                                    isNodeDirect ? "fill-amber-400" : "fill-blue-400"
-                                  )}
-                                >
-                                  {isNodeDirect ? "⚡ Direct Wire" : "🛹 Breadboard"}
-                                </text>
-                              </g>
-                            );
-                          });
-                        })()}
-                      </svg>
-
-                      {/* Visual Routing Legend */}
-                      <div className="absolute bottom-3 left-4 flex items-center gap-3 text-[10px] bg-black/80 border border-lab-border/70 px-3 py-1.5 rounded-lg shadow-sm">
-                        <div className="flex items-center gap-1.5 text-amber-400">
-                          <span className="w-3.5 h-0.5 bg-amber-400 inline-block rounded" />
-                          <span>Direct Header</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-blue-400">
-                          <span className="w-3.5 h-0.5 border-t-2 border-dashed border-blue-400 inline-block" />
-                          <span>Via Breadboard</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
-
-                {/* Interactive Wiring & Breadboard Section */}
-                <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4 overflow-y-auto max-h-[420px] flex flex-col justify-between">
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h3 className="text-sm font-bold uppercase tracking-widest text-lab-accent">Wiring & Breadboard</h3>
-                        <p className="text-[10px] text-lab-muted">Click any pin to modify • Auto-saves to localStorage</p>
-                      </div>
-                      <button
-                        onClick={() => setShowAddWireModal(true)}
-                        className="flex items-center gap-1 text-[11px] font-bold text-lab-accent hover:text-orange-400 bg-lab-accent/10 px-2.5 py-1 rounded-lg border border-lab-accent/30 transition-all"
-                        title="Add a custom wire connection"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        Add Wire
-                      </button>
-                    </div>
-
-                    <div className="space-y-3">
-                      {aiResult?.connections.map((conn, idx) => {
-                        const isDirect = conn.connectionMode === 'direct' || (!conn.breadboardCoords && conn.connectionMode !== 'breadboard');
-
-                        return (
-                          <div key={idx} className="bg-black/30 rounded-xl p-3 border border-lab-border/60 space-y-2 hover:border-lab-accent/40 transition-colors group">
-                            {/* Routing Mode Tag & Switcher */}
-                            <div className="flex items-center justify-between gap-2 pb-1 border-b border-white/5">
-                              <span className={cn(
-                                "text-[9px] px-2 py-0.5 rounded font-bold flex items-center gap-1 border",
-                                isDirect 
-                                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40" 
-                                  : "bg-blue-500/20 text-blue-300 border-blue-500/40"
-                              )}>
-                                {isDirect ? <Plug className="w-2.5 h-2.5" /> : <Grid className="w-2.5 h-2.5" />}
-                                {isDirect ? "Direct to Arduino" : "Via Breadboard"}
-                              </span>
-
-                              <button
-                                type="button"
-                                onClick={() => handleToggleConnectionMode(idx)}
-                                className="text-[9px] text-lab-muted hover:text-white hover:underline transition-colors flex items-center gap-1"
-                                title="Toggle between direct Arduino headers and breadboard routing"
-                              >
-                                Switch to {isDirect ? 'Breadboard' : 'Direct'}
-                              </button>
-                            </div>
-
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="flex-1 min-w-0">
-                                <div className="text-[10px] text-lab-muted uppercase font-bold truncate">{conn.compId}</div>
-                                <div className="text-xs text-white font-medium truncate">{conn.compPin}</div>
-                              </div>
-
-                              <ArrowRight className="w-3.5 h-3.5 text-lab-accent shrink-0" />
-
-                              <div className="flex-1 text-right min-w-0">
-                                <div className="text-[10px] text-lab-muted uppercase font-bold">Arduino Pin</div>
-                                {editingPinIdx === idx ? (
-                                  <div className="flex items-center justify-end gap-1 mt-0.5">
-                                    <select
-                                      value={conn.arduinoPin}
-                                      onChange={(e) => handleUpdatePin(idx, e.target.value)}
-                                      className="bg-black border border-lab-accent text-lab-accent text-xs font-mono rounded px-1.5 py-0.5 focus:outline-none"
-                                      autoFocus
-                                      onBlur={() => setEditingPinIdx(null)}
-                                    >
-                                      {STANDARD_ARDUINO_PINS.map(pin => (
-                                        <option key={pin} value={pin}>{pin}</option>
-                                      ))}
-                                      {!STANDARD_ARDUINO_PINS.includes(conn.arduinoPin) && (
-                                        <option value={conn.arduinoPin}>{conn.arduinoPin}</option>
-                                      )}
-                                    </select>
-                                  </div>
-                                ) : (
-                                  <button
-                                    onClick={() => setEditingPinIdx(idx)}
-                                    className="inline-flex items-center gap-1 text-xs text-lab-accent font-mono font-bold bg-lab-accent/15 px-2 py-0.5 rounded border border-lab-accent/30 hover:bg-lab-accent/25 transition-all"
-                                    title="Click to modify Arduino pin"
-                                  >
-                                    {conn.arduinoPin}
-                                    <Edit2 className="w-2.5 h-2.5 opacity-60 group-hover:opacity-100" />
-                                  </button>
-                                )}
-                              </div>
-
-                              {/* Remove connection button */}
-                              <button
-                                onClick={() => handleDeleteConnection(idx)}
-                                className="opacity-0 group-hover:opacity-100 p-1 text-lab-muted hover:text-red-400 transition-opacity"
-                                title="Delete this connection"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-
-                            {/* Breadboard coordinates (editable) or Direct Wire label */}
-                            <div className="pt-2 border-t border-lab-border/30 flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-1.5 text-[10px] text-lab-muted flex-1 min-w-0">
-                                <Grid className="w-3 h-3 text-lab-muted shrink-0" />
-                                {isDirect ? (
-                                  <span className="text-[10px] text-amber-200/80 italic">
-                                    Direct Header Wire (No breadboard contact)
-                                  </span>
-                                ) : editingCoordsIdx === idx ? (
-                                  <input
-                                    type="text"
-                                    value={customCoordsInput}
-                                    onChange={(e) => setCustomCoordsInput(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') handleUpdateCoords(idx, customCoordsInput);
-                                      if (e.key === 'Escape') setEditingCoordsIdx(null);
-                                    }}
-                                    onBlur={() => handleUpdateCoords(idx, customCoordsInput)}
-                                    placeholder="e.g. Row A, Col 12"
-                                    className="bg-black/50 border border-lab-accent text-white px-1.5 py-0.5 rounded text-[10px] w-full"
-                                    autoFocus
-                                  />
-                                ) : (
-                                  <button
-                                    onClick={() => {
-                                      setEditingCoordsIdx(idx);
-                                      setCustomCoordsInput(conn.breadboardCoords || '');
-                                    }}
-                                    className="text-[10px] text-left hover:text-white truncate"
-                                    title="Click to edit breadboard coordinate"
-                                  >
-                                    Breadboard: <span className="text-white font-bold">{conn.breadboardCoords || 'Row A, Col 10 (click to set)'}</span>
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                      {(!aiResult?.connections || aiResult.connections.length === 0) && (
-                        <p className="text-xs text-lab-muted text-center py-4">No wiring connections yet.</p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Add Wire Dialog */}
-                  <AnimatePresence>
-                    {showAddWireModal && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
-                        className="bg-black/50 border border-lab-accent/50 rounded-xl p-3.5 space-y-3 mt-3"
-                      >
-                        <div className="flex items-center justify-between text-xs font-bold text-lab-accent">
-                          <span>Add Wire Connection</span>
-                          <button onClick={() => setShowAddWireModal(false)} className="text-lab-muted hover:text-white">
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                        <form onSubmit={handleAddWire} className="space-y-2 text-xs">
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[10px] text-lab-muted block mb-0.5">Component ID</label>
-                              <input
-                                type="text"
-                                required
-                                placeholder="e.g. ds18b20, R1, resistor"
-                                value={newWireCompId}
-                                onChange={(e) => setNewWireCompId(e.target.value)}
-                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-white text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-lab-muted block mb-0.5">Component Pin</label>
-                              <input
-                                type="text"
-                                required
-                                placeholder="e.g. DATA, VCC, Pin 1"
-                                value={newWireCompPin}
-                                onChange={(e) => setNewWireCompPin(e.target.value)}
-                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-white text-xs"
-                              />
-                            </div>
-                          </div>
-                          
-                          {/* Connection Mode Selector for New Wire */}
-                          <div>
-                            <label className="text-[10px] text-lab-muted block mb-0.5">Connection Route (Strict Single-Route)</label>
-                            <div className="grid grid-cols-2 gap-2">
-                              <button
-                                type="button"
-                                onClick={() => setNewWireConnectionMode('direct')}
-                                className={cn(
-                                  "py-1 px-2 rounded text-xs font-bold border transition-all flex items-center justify-center gap-1",
-                                  newWireConnectionMode === 'direct'
-                                    ? "bg-amber-500 text-black border-amber-500"
-                                    : "bg-black/40 border-lab-border text-lab-muted hover:text-white"
-                                )}
-                              >
-                                <Plug className="w-3 h-3" />
-                                Direct to Arduino
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setNewWireConnectionMode('breadboard')}
-                                className={cn(
-                                  "py-1 px-2 rounded text-xs font-bold border transition-all flex items-center justify-center gap-1",
-                                  newWireConnectionMode === 'breadboard'
-                                    ? "bg-blue-500 text-white border-blue-500"
-                                    : "bg-black/40 border-lab-border text-lab-muted hover:text-white"
-                                )}
-                              >
-                                <Grid className="w-3 h-3" />
-                                Via Breadboard
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[10px] text-lab-muted block mb-0.5">Arduino Pin</label>
-                              <select
-                                value={newWireArduinoPin}
-                                onChange={(e) => setNewWireArduinoPin(e.target.value)}
-                                className="w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-lab-accent font-mono text-xs"
-                              >
-                                {STANDARD_ARDUINO_PINS.map(pin => (
-                                  <option key={pin} value={pin}>{pin}</option>
-                                ))}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-lab-muted block mb-0.5">
-                                {newWireConnectionMode === 'direct' ? 'Breadboard (Bypassed)' : 'Breadboard Tie-Point'}
-                              </label>
-                              <input
-                                type="text"
-                                disabled={newWireConnectionMode === 'direct'}
-                                placeholder={newWireConnectionMode === 'direct' ? 'Not applicable for direct' : 'e.g. Row C, Col 15'}
-                                value={newWireConnectionMode === 'direct' ? '' : newWireCoords}
-                                onChange={(e) => setNewWireCoords(e.target.value)}
-                                className={cn(
-                                  "w-full bg-black/60 border border-lab-border rounded px-2 py-1 text-white text-xs",
-                                  newWireConnectionMode === 'direct' && "opacity-40 cursor-not-allowed"
-                                )}
-                              />
-                            </div>
-                          </div>
-                          <div className="flex justify-end gap-2 pt-1">
-                            <button
-                              type="button"
-                              onClick={() => setShowAddWireModal(false)}
-                              className="px-2.5 py-1 text-[11px] text-lab-muted hover:text-white"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="submit"
-                              className="px-3 py-1 bg-lab-accent hover:bg-orange-600 text-white rounded text-[11px] font-bold transition-colors"
-                            >
-                              Add & Auto-Save
-                            </button>
-                          </div>
-                        </form>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </div>
+              )}
 
               {/* Breadboard Guide & Wire Suggestions & Code */}
               {!isGenerating && aiResult && (
@@ -1544,6 +1070,26 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
                         ))}
                       </div>
                     </div>
+
+                    {/* Sequential Physical Step-by-Step Connection Walkthrough */}
+                    {aiResult.sequentialGuides && aiResult.sequentialGuides.length > 0 && (
+                      <SequentialWiringWalkthrough
+                        sequentialGuides={aiResult.sequentialGuides}
+                        onUpdateGuides={(updated) => {
+                          const updatedResult = { ...aiResult, sequentialGuides: updated };
+                          setAiResult(updatedResult);
+                          executeAutoSave(projectId, projectName, intent, selectedPopularIds, updatedResult, resistors, componentConnectionModes);
+                        }}
+                        onResetGuides={() => {
+                          const refreshed = generateSchematicLocal(selectedPopularIds, intent, resistors, componentConnectionModes);
+                          if (refreshed.sequentialGuides) {
+                            const updatedResult = { ...aiResult, sequentialGuides: refreshed.sequentialGuides };
+                            setAiResult(updatedResult);
+                            executeAutoSave(projectId, projectName, intent, selectedPopularIds, updatedResult, resistors, componentConnectionModes);
+                          }
+                        }}
+                      />
+                    )}
 
                     {aiResult.breadboardGuide && (
                       <div className="bg-lab-card border border-lab-border rounded-2xl p-6 space-y-4">

@@ -1,4 +1,14 @@
-import { POPULAR_COMPONENTS, CustomConnection, ConnectionMode, WireSuggestion, CircuitResult, ResistorItem, SavedProject } from '../constants';
+import { 
+  POPULAR_COMPONENTS, 
+  CustomConnection, 
+  ConnectionMode, 
+  WireSuggestion, 
+  CircuitResult, 
+  ResistorItem, 
+  SavedProject,
+  ComponentSequentialGuide,
+  SequentialWiringStep
+} from '../constants';
 
 // Hardware Pinout Definitions and Capabilities
 const DIGITAL_PINS = ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13'];
@@ -731,6 +741,14 @@ export function generateSchematicLocal(
 
   const fullCode = codeLines.join('\n');
 
+  // Generate deterministic serial connection guide for every component
+  const sequentialGuides = generateSequentialGuides(
+    selectedComponentIds,
+    assignedPinsByComp,
+    resistors,
+    connectionModes
+  );
+
   // Generate detailed explanation
   const codeExplanation = `### Self-Processing Code Analysis
 - **Architecture**: Assembled deterministically for ${selectedComponentIds.length} connected hardware modules.
@@ -742,8 +760,664 @@ ${hasDS18B20 ? '- **1-Wire Temperature Protocol**: Handled by OneWire and Dallas
     wires,
     breadboardGuide,
     code: fullCode,
-    codeExplanation
+    codeExplanation,
+    sequentialGuides
   };
+}
+
+/**
+ * Generates serial, physical leg-by-leg step-by-step connection sequences for each component
+ */
+export function generateSequentialGuides(
+  selectedComponentIds: string[],
+  assignedPinsByComp: Record<string, Record<string, string>>,
+  resistors: ResistorItem[],
+  connectionModes: Record<string, ConnectionMode>
+): ComponentSequentialGuide[] {
+  const guides: ComponentSequentialGuide[] = [];
+
+  selectedComponentIds.forEach(id => {
+    const rule = COMPONENT_RULES[id];
+    const compMeta = POPULAR_COMPONENTS.find(p => p.id === id);
+    const compName = rule?.name || compMeta?.name || id.toUpperCase();
+    const mode: ConnectionMode = connectionModes[id] || (
+      ['led', 'resistor', 'resistor-330', 'ldr', 'push-button'].includes(id)
+        ? 'breadboard'
+        : 'direct'
+    );
+    const pinMap = assignedPinsByComp[id] || {};
+
+    if (id === 'led') {
+      const ledPin = pinMap['Anode (Long Leg)'] || 'D13';
+      const resVal = resistors.find(r => r.value.includes('220') || r.value.includes('330'))?.value || '220Ω';
+
+      if (mode === 'breadboard') {
+        guides.push({
+          componentId: id,
+          componentName: compName,
+          location: 'breadboard',
+          locationDetails: 'Breadboard Row E, Columns 15 & 16',
+          overview: `The LED is located on the breadboard. The long leg (anode) goes to one leg of the ${resVal} resistor in series, the other leg of the resistor connects to Arduino digital pin ${ledPin}, and the other leg of the LED (cathode) goes to Arduino GND.`,
+          steps: [
+            {
+              id: `${id}-step-1`,
+              stepNumber: 1,
+              instruction: `Insert the LED into the breadboard: place the long leg (Anode +) into Row E Col 15, and the shorter flat-notched leg (Cathode -) into Row E Col 16.`,
+              fromPoint: 'LED Anode & Cathode',
+              toPoint: 'Breadboard Row E, Cols 15 & 16',
+              wireType: 'Component Legs Insertion',
+              details: 'The longer leg is the positive Anode; the shorter leg (and flat edge on the plastic collar) is the negative Cathode.',
+              completed: false
+            },
+            {
+              id: `${id}-step-2`,
+              stepNumber: 2,
+              instruction: `Connect the resistor in series: insert one leg of the ${resVal} resistor into Row E Col 15 (sharing the tie-point column with the LED long leg), and insert the second leg into Row E Col 18.`,
+              fromPoint: 'LED Long Leg (Anode) at Row E Col 15',
+              toPoint: `Resistor (${resVal}) Leg 1 at Row E Col 15`,
+              wireType: 'Series Breadboard Tie-Point',
+              details: `Placing both legs in column 15 creates a direct physical series connection to limit current through the LED.`,
+              completed: false
+            },
+            {
+              id: `${id}-step-3`,
+              stepNumber: 3,
+              instruction: `Connect the other part of the resistor to the Arduino: run a Male-to-Male jumper wire from Row E Col 18 (the second leg of the resistor) to Arduino digital pin ${ledPin}.`,
+              fromPoint: `Resistor Leg 2 (Row E Col 18)`,
+              toPoint: `Arduino Digital Pin ${ledPin}`,
+              wireType: 'Male-to-Male Jumper Wire',
+              details: `When Arduino pin ${ledPin} outputs 5V (HIGH), electric current flows through the resistor into the LED.`,
+              completed: false
+            },
+            {
+              id: `${id}-step-4`,
+              stepNumber: 4,
+              instruction: `Connect the other leg of the LED to Arduino GND: run a Male-to-Male jumper wire from Row E Col 16 (the short leg of the LED) directly to an Arduino GND pin (or the breadboard blue negative rail).`,
+              fromPoint: 'LED Short Leg (Cathode) at Row E Col 16',
+              toPoint: 'Arduino GND (or Blue - Rail)',
+              wireType: 'Male-to-Male Jumper Wire',
+              details: 'Completes the circuit return path back to the Arduino ground reference.',
+              completed: false
+            }
+          ]
+        });
+      } else {
+        guides.push({
+          componentId: id,
+          componentName: compName,
+          location: 'direct',
+          locationDetails: 'Direct DuPont Jumper Wiring with Inline Resistor',
+          overview: `The LED connects directly to Arduino headers using DuPont jumper cables with a ${resVal} resistor placed inline on the positive lead.`,
+          steps: [
+            {
+              id: `${id}-step-1`,
+              stepNumber: 1,
+              instruction: `Connect the long leg (Anode +) of the LED to one leg of the ${resVal} current-limiting resistor.`,
+              fromPoint: 'LED Long Leg (Anode)',
+              toPoint: `Resistor (${resVal}) Leg 1`,
+              wireType: 'Series Lead Connection',
+              details: 'Never connect an LED directly to 5V without a current-limiting resistor, or the diode will burn out.',
+              completed: false
+            },
+            {
+              id: `${id}-step-2`,
+              stepNumber: 2,
+              instruction: `Connect the second leg of the ${resVal} resistor using a Female-to-Male jumper wire directly into Arduino digital pin ${ledPin}.`,
+              fromPoint: `Resistor (${resVal}) Leg 2`,
+              toPoint: `Arduino Digital Pin ${ledPin}`,
+              wireType: 'Female-to-Male Jumper Cable',
+              details: 'This sends the digital switching signal directly to the resistor input.',
+              completed: false
+            },
+            {
+              id: `${id}-step-3`,
+              stepNumber: 3,
+              instruction: `Connect the short leg (Cathode -) of the LED using a Female-to-Male jumper wire directly into an Arduino GND header pin.`,
+              fromPoint: 'LED Short Leg (Cathode)',
+              toPoint: 'Arduino GND Header',
+              wireType: 'Female-to-Male Jumper Cable',
+              details: 'Provides the common ground return to the microcontroller.',
+              completed: false
+            }
+          ]
+        });
+      }
+    } else if (id === 'ds18b20') {
+      const dataPin = pinMap['DATA (Yellow/Signal)'] || 'D2';
+      const pullUpVal = resistors.find(r => r.value.includes('4.7k') || r.value.includes('4k7'))?.value || '4.7kΩ';
+
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: mode,
+        locationDetails: mode === 'breadboard' ? 'Breadboard Row A-C, Col 12' : 'Direct Sensor Lead Harness',
+        overview: `The DS18B20 digital temperature probe communicates over a single 1-Wire data bus and requires a ${pullUpVal} pull-up resistor between the DATA line and the 5V line.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: mode === 'breadboard' 
+              ? `Insert the DS18B20 probe into the breadboard: insert VCC (Red) into Row A Col 12, GND (Black) into Row B Col 12, and DATA (Yellow) into Row C Col 12.`
+              : `Identify the 3 wires of the DS18B20 probe: Red is VCC (+5V), Black is GND, and Yellow is DATA signal.`,
+            fromPoint: 'DS18B20 Sensor Leads',
+            toPoint: mode === 'breadboard' ? 'Breadboard Rows A, B, C Col 12' : 'Wire Harness',
+            wireType: mode === 'breadboard' ? 'Component Insertion' : 'Direct Wire Leads',
+            details: 'Ensure the pinout matches correctly to avoid reverse polarity heating.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Install the pull-up resistor: place one leg of the ${pullUpVal} resistor into the VCC line (Red wire / Row A Col 12) and the other leg into the DATA line (Yellow wire / Row C Col 12).`,
+            fromPoint: `VCC Line (Red)`,
+            toPoint: `DATA Line (Yellow)`,
+            wireType: `Resistor (${pullUpVal}) Bridge`,
+            details: `The 1-Wire protocol relies on an open-drain bus: the ${pullUpVal} resistor pulls the data line HIGH when sensors are idle.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect VCC power: run a jumper wire from the VCC connection (Row A Col 12 / Red wire) to Arduino 5V.`,
+            fromPoint: 'VCC (Red) + Resistor Leg 1',
+            toPoint: 'Arduino 5V Header',
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: 'Supplies regulated 5V DC power to the internal Dallas semiconductor logic.',
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Connect DATA signal: run a jumper wire from the DATA connection (Row C Col 12 / Yellow wire) to Arduino digital pin ${dataPin}.`,
+            fromPoint: 'DATA (Yellow) + Resistor Leg 2',
+            toPoint: `Arduino Digital Pin ${dataPin}`,
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: `Digital pin ${dataPin} sends reset pulses and reads microsecond temperature scratchpad packets.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-5`,
+            stepNumber: 5,
+            instruction: `Connect GND: run a jumper wire from the GND lead (Row B Col 12 / Black wire) to Arduino GND.`,
+            fromPoint: 'GND (Black)',
+            toPoint: 'Arduino GND Header',
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: 'Ground connection creates common circuit reference.',
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'push-button') {
+      const btnPin = pinMap['Terminal A'] || 'D2';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: 'breadboard',
+        locationDetails: 'Breadboard Center Trough (Row D, Cols 8 & 10)',
+        overview: `The tactile push button sits across the breadboard center trough. Terminal A connects to Arduino digital pin ${btnPin} (configured in code with INPUT_PULLUP), and Terminal B connects to Arduino GND.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: `Position the push button: place the 4-pin tactile switch straddling the center divider trough of the breadboard, so Terminal A sits in Row D Col 8 and Terminal B sits in Row D Col 10.`,
+            fromPoint: 'Tactile Button Switch',
+            toPoint: 'Breadboard Row D, Cols 8 & 10',
+            wireType: 'Trough-Straddle Insertion',
+            details: 'Straddling the center trough ensures the left and right terminal pairs do not short together.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect Terminal A to Arduino: run a Male-to-Male jumper wire from Row D Col 8 to Arduino digital pin ${btnPin}.`,
+            fromPoint: 'Terminal A (Row D Col 8)',
+            toPoint: `Arduino Digital Pin ${btnPin}`,
+            wireType: 'Male-to-Male Jumper Wire',
+            details: `Configured as INPUT_PULLUP in code so the pin stays HIGH until the button is clicked.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect Terminal B to Ground: run a Male-to-Male jumper wire from Row D Col 10 to Arduino GND (or breadboard blue GND rail).`,
+            fromPoint: 'Terminal B (Row D Col 10)',
+            toPoint: 'Arduino GND',
+            wireType: 'Male-to-Male Jumper Wire',
+            details: 'When the button is clicked, it connects digital pin to GND, pulling the reading to LOW.',
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'ldr') {
+      const analogPin = pinMap['Leg 2 (Signal)'] || 'A0';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: 'breadboard',
+        locationDetails: 'Breadboard Row C, Cols 18 & 19',
+        overview: `The Photoresistor (LDR) is wired in series with a 10kΩ pull-down resistor to create a voltage divider. The analog signal tap between them connects to Arduino pin ${analogPin}.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: `Insert the LDR into the breadboard: insert Leg 1 into Row C Col 18, and Leg 2 into Row C Col 19.`,
+            fromPoint: 'LDR Photoresistor',
+            toPoint: 'Breadboard Row C, Cols 18 & 19',
+            wireType: 'Component Legs Insertion',
+            details: 'LDRs are non-polar so either leg can serve as Leg 1 or Leg 2.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect Leg 1 to 5V: run a jumper wire from Row C Col 18 to the Breadboard Red (+) 5V power rail.`,
+            fromPoint: 'LDR Leg 1 (Row C Col 18)',
+            toPoint: 'Breadboard 5V (+) Rail',
+            wireType: 'Male-to-Male Jumper Wire',
+            details: 'Supplies 5V potential into the top side of the light-sensitive resistor.',
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect the 10kΩ resistor in series: insert one leg into Row C Col 19 (in series with Leg 2 of the LDR), and insert the second leg into the Breadboard Blue (-) GND rail.`,
+            fromPoint: 'LDR Leg 2 (Row C Col 19)',
+            toPoint: '10kΩ Resistor Leg 1 (Row C Col 19) to GND',
+            wireType: 'Series Voltage Divider Resistor',
+            details: 'Forms a voltage divider: changing light alters the LDR resistance and shifts the midpoint voltage.',
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Connect the analog measurement tap: run a jumper wire from Row C Col 19 (the junction between LDR and resistor) to Arduino Analog pin ${analogPin}.`,
+            fromPoint: 'LDR / Resistor Junction (Row C Col 19)',
+            toPoint: `Arduino Analog Pin ${analogPin}`,
+            wireType: 'Male-to-Male Jumper Wire',
+            details: `Arduino ADC reads 0-1023 (0V to 5V) proportional to light level.`,
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'buzzer') {
+      const buzzerPin = pinMap['Positive (+)'] || 'D8';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: mode,
+        locationDetails: mode === 'breadboard' ? 'Breadboard Row J, Cols 20 & 21' : 'Direct Header Leads',
+        overview: `The Piezo buzzer emits audible frequencies when square waves are sent to its positive (+) lead from Arduino digital pin ${buzzerPin}.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: mode === 'breadboard'
+              ? `Insert the buzzer: insert the longer positive leg (+) into Row J Col 20, and the shorter negative leg (-) into Row J Col 21.`
+              : `Identify buzzer polarity: the longer lead or casing marked with (+) is positive; the shorter lead is negative (-).`,
+            fromPoint: 'Piezo Buzzer',
+            toPoint: mode === 'breadboard' ? 'Breadboard Row J, Cols 20 & 21' : 'Header Jumpers',
+            wireType: mode === 'breadboard' ? 'Component Insertion' : 'Direct Leads',
+            details: 'Observe polarity markings on top of the cylindrical plastic housing.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect the positive (+) terminal: run a jumper wire from the buzzer positive leg (Row J Col 20) to Arduino digital pin ${buzzerPin}.`,
+            fromPoint: 'Buzzer Positive (+) Leg',
+            toPoint: `Arduino Digital Pin ${buzzerPin}`,
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: `Arduino uses tone() to oscillate digital pin ${buzzerPin} at 1000Hz.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect the negative (-) terminal: run a jumper wire from the buzzer negative leg (Row J Col 21) to Arduino GND.`,
+            fromPoint: 'Buzzer Negative (-) Leg',
+            toPoint: 'Arduino GND',
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: 'Ground return path completes the piezoelectric element circuit.',
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'ultrasonic') {
+      const trigPin = pinMap['Trig'] || 'D9';
+      const echoPin = pinMap['Echo'] || 'D10';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: mode,
+        locationDetails: mode === 'breadboard' ? 'Breadboard Columns 2 to 5' : 'Direct DuPont Cable Harness',
+        overview: `The HC-SR04 ultrasonic distance sensor uses 4 pins: VCC (+5V), Trig (pulse transmitter on pin ${trigPin}), Echo (pulse receiver on pin ${echoPin}), and GND.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: mode === 'breadboard'
+              ? `Insert the 4 pins of HC-SR04 into breadboard columns 2 through 5: VCC in Col 2, Trig in Col 3, Echo in Col 4, GND in Col 5.`
+              : `Connect 4 Female-to-Male DuPont jumper cables to the HC-SR04 header pins: VCC, Trig, Echo, and GND.`,
+            fromPoint: 'HC-SR04 Sensor Pins',
+            toPoint: mode === 'breadboard' ? 'Breadboard Cols 2, 3, 4, 5' : 'DuPont Cable Harness',
+            wireType: mode === 'breadboard' ? 'Header Insertion' : 'Female-to-Male DuPont',
+            details: 'Mount facing outward with ultrasonic transducers clear of obstacles.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect VCC: run a jumper wire from the sensor VCC pin to Arduino 5V.`,
+            fromPoint: 'HC-SR04 VCC Pin',
+            toPoint: 'Arduino 5V Header',
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: 'Transducers require steady 5V power to fire 40kHz ultrasonic burst bursts.',
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect Trig (Trigger): run a jumper wire from the sensor Trig pin to Arduino digital pin ${trigPin}.`,
+            fromPoint: 'HC-SR04 Trig Pin',
+            toPoint: `Arduino Digital Pin ${trigPin}`,
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: `A 10-microsecond HIGH pulse from pin ${trigPin} triggers ultrasonic emission.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Connect Echo (Listener): run a jumper wire from the sensor Echo pin to Arduino digital pin ${echoPin}.`,
+            fromPoint: 'HC-SR04 Echo Pin',
+            toPoint: `Arduino Digital Pin ${echoPin}`,
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: `Arduino measures the duration Echo stays HIGH with pulseIn() to compute distance.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-5`,
+            stepNumber: 5,
+            instruction: `Connect GND: run a jumper wire from the sensor GND pin to Arduino GND.`,
+            fromPoint: 'HC-SR04 GND Pin',
+            toPoint: 'Arduino GND Header',
+            wireType: mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper',
+            details: 'Ground connection for echo timing reference.',
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'servo-motor') {
+      const servoPin = pinMap['Orange (PWM)'] || 'D9';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: 'direct',
+        locationDetails: 'Standard 3-Pin Female Servo Lead Header',
+        overview: `Micro-servo with 3-pin lead: Brown (GND), Red (5V Power), and Orange (PWM signal on pin ${servoPin}).`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: `Identify the 3 servo connector leads: Brown (or Black) is Ground, Red is 5V Power, and Orange (or Yellow) is PWM Control.`,
+            fromPoint: 'Servo 3-Pin Female Lead',
+            toPoint: 'Connector Identification',
+            wireType: '3-Pin Female Header',
+            details: 'Never reverse the Red and Brown wires, which can damage the servo control IC.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect Ground: attach a Male-to-Male jumper from the Brown lead to Arduino GND.`,
+            fromPoint: 'Servo Brown Wire (GND)',
+            toPoint: 'Arduino GND',
+            wireType: 'Male-to-Male Jumper',
+            details: 'Common ground for control signal pulses.',
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect 5V Power: attach a Male-to-Male jumper from the Red lead to Arduino 5V.`,
+            fromPoint: 'Servo Red Wire (5V)',
+            toPoint: 'Arduino 5V',
+            wireType: 'Male-to-Male Jumper',
+            details: 'For high torque loads, power via dedicated external 5V-6V supply sharing common GND.',
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Connect PWM Signal: attach a Male-to-Male jumper from the Orange lead to Arduino PWM pin ${servoPin}.`,
+            fromPoint: 'Servo Orange Wire (PWM)',
+            toPoint: `Arduino PWM Pin ${servoPin}`,
+            wireType: 'Male-to-Male Jumper',
+            details: `Sends 50Hz PWM position pulses (1ms to 2ms pulse width for 0° to 180° rotation).`,
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'dht11') {
+      const dhtPin = pinMap['DATA'] || 'D4';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: mode,
+        locationDetails: mode === 'breadboard' ? 'Breadboard Row A, Cols 28-30' : 'Direct Sensor Harness',
+        overview: `DHT11 digital humidity and temperature module. Pin 1 (VCC) to 5V, Pin 2 (DATA) to pin ${dhtPin} with pull-up, Pin 4 (GND) to GND.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: `Insert DHT11 pins: Pin 1 (left) = VCC, Pin 2 = DATA, Pin 3 = NC (no connect), Pin 4 (right) = GND.`,
+            fromPoint: 'DHT11 Pins',
+            toPoint: 'Breadboard / Cable',
+            wireType: 'Component Insertion',
+            details: 'If using a 3-pin breakout board, pin labels VCC, DATA, and GND are printed on the PCB.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Install 10kΩ pull-up resistor: place a 10kΩ resistor across Pin 1 (VCC) and Pin 2 (DATA) if using a 4-pin bare sensor.`,
+            fromPoint: 'Pin 1 (VCC)',
+            toPoint: 'Pin 2 (DATA)',
+            wireType: '10kΩ Pull-Up Resistor',
+            details: 'Pull-up resistor maintains idle bus state during bi-directional serial transfer.',
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect VCC to Arduino 5V.`,
+            fromPoint: 'DHT11 Pin 1 (VCC)',
+            toPoint: 'Arduino 5V',
+            wireType: 'Jumper Wire',
+            details: 'Power input.',
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Connect DATA to Arduino digital pin ${dhtPin}.`,
+            fromPoint: 'DHT11 Pin 2 (DATA)',
+            toPoint: `Arduino Digital Pin ${dhtPin}`,
+            wireType: 'Jumper Wire',
+            details: 'Transmits 40-bit humidity and temperature packets.',
+            completed: false
+          },
+          {
+            id: `${id}-step-5`,
+            stepNumber: 5,
+            instruction: `Connect GND to Arduino GND.`,
+            fromPoint: 'DHT11 Pin 4 (GND)',
+            toPoint: 'Arduino GND',
+            wireType: 'Jumper Wire',
+            details: 'Ground connection.',
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'relay') {
+      const relayPin = pinMap['IN (Trigger)'] || 'D7';
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: 'direct',
+        locationDetails: 'Relay Breakout Header & Screw Terminals',
+        overview: `5V electromechanical relay with optocoupler isolation. Signal IN connects to Arduino digital pin ${relayPin}. High-power loads wire in series across COM and NO terminals.`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: `Connect VCC pin on the relay module to Arduino 5V.`,
+            fromPoint: 'Relay VCC Header',
+            toPoint: 'Arduino 5V',
+            wireType: 'Female-to-Male Jumper',
+            details: 'Powers the coil and optocoupler circuit.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect GND pin on the relay module to Arduino GND.`,
+            fromPoint: 'Relay GND Header',
+            toPoint: 'Arduino GND',
+            wireType: 'Female-to-Male Jumper',
+            details: 'Common ground return.',
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect IN (Signal) pin to Arduino digital pin ${relayPin}.`,
+            fromPoint: 'Relay IN Header',
+            toPoint: `Arduino Digital Pin ${relayPin}`,
+            wireType: 'Female-to-Male Jumper',
+            details: `Driving pin ${relayPin} HIGH energizes the magnetic coil and closes the contact.`,
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Wire output device in series: connect the external circuit live wire to COM (Common) and NO (Normally Open) screw terminals.`,
+            fromPoint: 'External Circuit Live Lead',
+            toPoint: 'Relay COM & NO Screw Terminals',
+            wireType: 'Screw Terminal Series Wire',
+            details: 'The relay acts as an isolated mechanical switch in series with the external load.',
+            completed: false
+          }
+        ]
+      });
+    } else if (id === 'lcd-i2c') {
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: 'direct',
+        locationDetails: '4-Pin I2C Backpack on rear of LCD',
+        overview: `16x2 character display communicating over I2C serial bus via A4 (SDA) and A5 (SCL).`,
+        steps: [
+          {
+            id: `${id}-step-1`,
+            stepNumber: 1,
+            instruction: `Connect GND pin on the I2C backpack to Arduino GND.`,
+            fromPoint: 'LCD I2C GND',
+            toPoint: 'Arduino GND',
+            wireType: 'Female-to-Male Jumper',
+            details: 'Ground connection.',
+            completed: false
+          },
+          {
+            id: `${id}-step-2`,
+            stepNumber: 2,
+            instruction: `Connect VCC pin on the I2C backpack to Arduino 5V.`,
+            fromPoint: 'LCD I2C VCC',
+            toPoint: 'Arduino 5V',
+            wireType: 'Female-to-Male Jumper',
+            details: 'Powers the HD44780 controller and LED backlight.',
+            completed: false
+          },
+          {
+            id: `${id}-step-3`,
+            stepNumber: 3,
+            instruction: `Connect SDA (Serial Data) pin on the I2C backpack to Arduino pin A4 (or dedicated SDA header).`,
+            fromPoint: 'LCD I2C SDA',
+            toPoint: 'Arduino Pin A4 (SDA)',
+            wireType: 'Female-to-Male Jumper',
+            details: 'Carries bi-directional I2C serial data bytes.',
+            completed: false
+          },
+          {
+            id: `${id}-step-4`,
+            stepNumber: 4,
+            instruction: `Connect SCL (Serial Clock) pin on the I2C backpack to Arduino pin A5 (or dedicated SCL header).`,
+            fromPoint: 'LCD I2C SCL',
+            toPoint: 'Arduino Pin A5 (SCL)',
+            wireType: 'Female-to-Male Jumper',
+            details: 'Synchronizes clock pulses for I2C communication.',
+            completed: false
+          }
+        ]
+      });
+    } else {
+      // General comprehensive handler for any other component
+      const steps: SequentialWiringStep[] = [];
+      const pins = rule?.pins || [];
+
+      if (pins.length > 0) {
+        pins.forEach((pin, pIdx) => {
+          const aPin = pinMap[pin.pinName] || pin.preferredArduinoPin;
+          let wireType = mode === 'breadboard' ? 'Male-to-Male Jumper' : 'Female-to-Male Jumper';
+          let details = `Connects ${pin.pinName} for ${pin.pinType} operation.`;
+
+          if (pin.pinType === 'power_5v' || pin.pinType === 'power_3v3') {
+            details = `Supplies ${pin.pinType === 'power_3v3' ? '3.3V' : '5V'} DC power.`;
+          } else if (pin.pinType === 'gnd') {
+            details = 'Circuit ground reference return.';
+          } else if (pin.pinType === 'analog') {
+            details = `Analog voltage sensing line read via Arduino ADC.`;
+          } else {
+            details = `Digital logic control line.`;
+          }
+
+          steps.push({
+            id: `${id}-step-${pIdx + 1}`,
+            stepNumber: pIdx + 1,
+            instruction: mode === 'breadboard'
+              ? `Connect ${pin.pinName}: run a jumper wire from ${pin.breadboardRow} Col ${pin.breadboardCol} to Arduino ${aPin}.`
+              : `Connect ${pin.pinName}: attach a jumper wire directly from the component pin to Arduino ${aPin}.`,
+            fromPoint: `${compName} ${pin.pinName}`,
+            toPoint: `Arduino ${aPin}`,
+            wireType,
+            details,
+            completed: false
+          });
+        });
+      } else {
+        steps.push({
+          id: `${id}-step-1`,
+          stepNumber: 1,
+          instruction: `Connect ${compName} terminals sequentially according to circuit requirements.`,
+          fromPoint: `${compName} Terminals`,
+          toPoint: 'Arduino Headers',
+          wireType: 'Jumper Wire',
+          details: 'Physical pin routing.',
+          completed: false
+        });
+      }
+
+      guides.push({
+        componentId: id,
+        componentName: compName,
+        location: mode,
+        locationDetails: mode === 'breadboard' ? 'Breadboard tie-points' : 'Direct Arduino header connection',
+        overview: `Sequential step-by-step physical connection guide for ${compName}.`,
+        steps
+      });
+    }
+  });
+
+  return guides;
 }
 
 /**
