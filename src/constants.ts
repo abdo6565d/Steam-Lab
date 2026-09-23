@@ -94,6 +94,34 @@ export interface ResistorItem {
   label?: string;
 }
 
+export interface ResistorValueCount {
+  value: string;
+  count: number;
+  label?: string;
+}
+
+export interface LedConfig {
+  id: string;
+  color: string;
+}
+
+export const STANDARD_LED_COLORS = [
+  { name: 'Red', hex: '#ef4444', glow: 'rgba(239, 68, 68, 0.5)', bgClass: 'bg-red-500' },
+  { name: 'Green', hex: '#22c55e', glow: 'rgba(34, 197, 94, 0.5)', bgClass: 'bg-green-500' },
+  { name: 'Blue', hex: '#3b82f6', glow: 'rgba(59, 130, 246, 0.5)', bgClass: 'bg-blue-500' },
+  { name: 'Yellow', hex: '#eab308', glow: 'rgba(234, 179, 8, 0.5)', bgClass: 'bg-yellow-500' },
+  { name: 'White', hex: '#f8fafc', glow: 'rgba(248, 250, 252, 0.5)', bgClass: 'bg-slate-100' },
+  { name: 'Orange', hex: '#f97316', glow: 'rgba(249, 115, 22, 0.5)', bgClass: 'bg-orange-500' },
+];
+
+export const DEFAULT_RESISTOR_PRESETS = [
+  { value: '220Ω', label: 'LED Current Limiter' },
+  { value: '330Ω', label: 'LED / Logic' },
+  { value: '1kΩ', label: 'Signal / Pull-Up' },
+  { value: '4.7kΩ', label: 'DS18B20 1-Wire Pull-Up' },
+  { value: '10kΩ', label: 'Button / LDR Divider' },
+];
+
 export interface SavedProject {
   id: string;
   name: string;
@@ -103,6 +131,9 @@ export interface SavedProject {
   result: AIResult;
   resistorValue?: string;
   resistors?: ResistorItem[];
+  componentCounts?: Record<string, number>;
+  ledColors?: string[];
+  resistorValueCounts?: ResistorValueCount[];
   componentConnectionModes?: Record<string, ConnectionMode>;
 }
 

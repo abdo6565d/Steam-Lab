@@ -396,7 +396,9 @@ const int MOTOR_IN2 = ${pins['IN2'] ? pins['IN2'].replace('D', '') : '4'};`,
  */
 export function allocatePins(
   selectedComponentIds: string[],
-  connectionModes: Record<string, ConnectionMode> = {}
+  connectionModes: Record<string, ConnectionMode> = {},
+  componentCounts: Record<string, number> = {},
+  ledColors: string[] = ['Red']
 ): {
   connections: CustomConnection[];
   assignedPinsByComp: Record<string, Record<string, string>>;
@@ -417,10 +419,9 @@ export function allocatePins(
     const rule = COMPONENT_RULES[compId];
     if (!rule) continue;
 
-    assignedPinsByComp[compId] = {};
+    const count = (compId === 'resistor' || compId === 'resistor-330') ? 1 : (componentCounts[compId] || 1);
 
     // Determine connection mode: direct to Arduino header vs mounted through breadboard
-    // Discrete passive components default to breadboard; modular breakout boards default to direct or breadboard
     const mode: ConnectionMode = connectionModes[compId] || (
       ['led', 'resistor', 'resistor-330', 'ldr', 'push-button'].includes(compId)
         ? 'breadboard'
@@ -428,44 +429,66 @@ export function allocatePins(
     );
     const isDirect = mode === 'direct';
 
-    for (const pin of rule.pins) {
-      let finalPin = pin.preferredArduinoPin;
+    assignedPinsByComp[compId] = {};
 
-      if (pin.pinType === 'digital') {
-        if (usedDigitalPins.has(finalPin)) {
-          const available = DIGITAL_PINS.find(p => !usedDigitalPins.has(p));
-          if (available) finalPin = available;
-        }
-        usedDigitalPins.add(finalPin);
-      } else if (pin.pinType === 'pwm') {
-        if (usedDigitalPins.has(finalPin)) {
-          const availablePWM = PWM_PINS.find(p => !usedDigitalPins.has(p));
-          if (availablePWM) {
-            finalPin = availablePWM;
-          } else {
-            const availableDig = DIGITAL_PINS.find(p => !usedDigitalPins.has(p));
-            if (availableDig) finalPin = availableDig;
-          }
-        }
-        usedDigitalPins.add(finalPin);
-      } else if (pin.pinType === 'analog') {
-        if (usedAnalogPins.has(finalPin)) {
-          const available = ANALOG_PINS.find(p => !usedAnalogPins.has(p));
-          if (available) finalPin = available;
-        }
-        usedAnalogPins.add(finalPin);
+    for (let u = 0; u < count; u++) {
+      const unitKey = count === 1 ? compId : `${compId}-${u + 1}`;
+      if (!assignedPinsByComp[unitKey]) {
+        assignedPinsByComp[unitKey] = {};
       }
 
-      assignedPinsByComp[compId][pin.pinName] = finalPin;
+      const ledColor = compId === 'led' 
+        ? (ledColors[u] || (u === 0 ? 'Red' : u === 1 ? 'Green' : 'Blue')) 
+        : null;
 
-      // Exactly ONE unambiguous connection entry per pin - never duplicate direct and breadboard!
-      connections.push({
-        compId: compId,
-        compPin: pin.pinName,
-        arduinoPin: finalPin,
-        connectionMode: mode,
-        breadboardCoords: isDirect ? undefined : `${pin.breadboardRow}, Col ${pin.breadboardCol}`
-      });
+      for (const pin of rule.pins) {
+        let finalPin = pin.preferredArduinoPin;
+
+        if (pin.pinType === 'digital') {
+          if (usedDigitalPins.has(finalPin)) {
+            const available = DIGITAL_PINS.find(p => !usedDigitalPins.has(p));
+            if (available) finalPin = available;
+          }
+          usedDigitalPins.add(finalPin);
+        } else if (pin.pinType === 'pwm') {
+          if (usedDigitalPins.has(finalPin)) {
+            const availablePWM = PWM_PINS.find(p => !usedDigitalPins.has(p));
+            if (availablePWM) {
+              finalPin = availablePWM;
+            } else {
+              const availableDig = DIGITAL_PINS.find(p => !usedDigitalPins.has(p));
+              if (availableDig) finalPin = availableDig;
+            }
+          }
+          usedDigitalPins.add(finalPin);
+        } else if (pin.pinType === 'analog') {
+          if (usedAnalogPins.has(finalPin)) {
+            const available = ANALOG_PINS.find(p => !usedAnalogPins.has(p));
+            if (available) finalPin = available;
+          }
+          usedAnalogPins.add(finalPin);
+        }
+
+        assignedPinsByComp[unitKey][pin.pinName] = finalPin;
+        if (u === 0) {
+          assignedPinsByComp[compId][pin.pinName] = finalPin;
+        }
+
+        const pinLabel = compId === 'led' && pin.pinName.includes('Anode')
+          ? `${pin.pinName}${ledColor ? ` [${ledColor}]` : ''}`
+          : pin.pinName;
+
+        const bbColOffset = u * 5;
+        const bbCoords = isDirect ? undefined : `${pin.breadboardRow}, Col ${pin.breadboardCol + bbColOffset}`;
+
+        connections.push({
+          compId: count === 1 ? compId : `${compId}-${u + 1}${ledColor ? ` (${ledColor})` : ''}`,
+          compPin: pinLabel,
+          arduinoPin: finalPin,
+          connectionMode: mode,
+          breadboardCoords: bbCoords
+        });
+      }
     }
   }
 
@@ -479,40 +502,153 @@ export function generateSchematicLocal(
   selectedComponentIds: string[],
   intent: string,
   resistors: ResistorItem[] = [],
-  connectionModes: Record<string, ConnectionMode> = {}
+  connectionModes: Record<string, ConnectionMode> = {},
+  componentCounts: Record<string, number> = {},
+  ledColors: string[] = ['Red']
 ): CircuitResult {
-  const { connections, assignedPinsByComp } = allocatePins(selectedComponentIds, connectionModes);
+  const effectiveCounts: Record<string, number> = { ...componentCounts };
+  let effectiveLedColors: string[] = [...ledColors];
+  const effectiveSelectedIds: string[] = [...selectedComponentIds];
+  const lowerIntent = (intent || '').toLowerCase();
 
-  const hasDS18B20 = selectedComponentIds.includes('ds18b20');
-  const hasLED = selectedComponentIds.includes('led');
-  const hasBuzzer = selectedComponentIds.includes('buzzer');
-  const hasServo = selectedComponentIds.includes('servo-motor');
-  const hasUltrasonic = selectedComponentIds.includes('ultrasonic');
-  const hasMotor = selectedComponentIds.includes('motor-driver');
-  const hasRelay = selectedComponentIds.includes('relay');
-  const hasLDR = selectedComponentIds.includes('ldr');
-  const hasLCD = selectedComponentIds.includes('lcd-i2c');
+  // If intent mentions temperature, degrees, or ds18b20, ensure ds18b20 is selected
+  if (
+    lowerIntent.includes('temp') || 
+    lowerIntent.includes('ds18b20') || 
+    lowerIntent.includes('degree') || 
+    lowerIntent.includes('°c') ||
+    lowerIntent.includes('celsius')
+  ) {
+    if (!effectiveSelectedIds.includes('ds18b20')) {
+      effectiveSelectedIds.push('ds18b20');
+    }
+  }
+
+  // Parse LED count from intent if specified (e.g., "3 leds", "3 led", "three leds")
+  const ledCountMatch = lowerIntent.match(/(\d+)\s*leds?/i);
+  if (ledCountMatch) {
+    const parsedCount = parseInt(ledCountMatch[1], 10);
+    if (parsedCount > 0 && parsedCount <= 8) {
+      effectiveCounts['led'] = Math.max(effectiveCounts['led'] || 1, parsedCount);
+      if (!effectiveSelectedIds.includes('led')) {
+        effectiveSelectedIds.push('led');
+      }
+    }
+  }
+
+  // Parse LED colors from intent in order of appearance
+  const detectedColors: string[] = [];
+  const colorOrder = ['red', 'green', 'blue', 'yellow', 'white', 'orange'];
+  const colorMatches: { color: string; index: number }[] = [];
+  colorOrder.forEach(c => {
+    let idx = lowerIntent.indexOf(c);
+    while (idx !== -1) {
+      const before = idx === 0 ? ' ' : lowerIntent[idx - 1];
+      const after = idx + c.length >= lowerIntent.length ? ' ' : lowerIntent[idx + c.length];
+      if (/[\s\(\[\,\-\:\;\)\.\/]/.test(before) && /[\s\(\[\,\-\:\;\)\.\/]/.test(after)) {
+        colorMatches.push({ color: c.charAt(0).toUpperCase() + c.slice(1), index: idx });
+      }
+      idx = lowerIntent.indexOf(c, idx + 1);
+    }
+  });
+
+  colorMatches.sort((a, b) => a.index - b.index);
+  colorMatches.forEach(m => {
+    if (!detectedColors.includes(m.color)) {
+      detectedColors.push(m.color);
+    }
+  });
+
+  if (detectedColors.length > 0) {
+    if (!effectiveSelectedIds.includes('led')) {
+      effectiveSelectedIds.push('led');
+    }
+    effectiveCounts['led'] = Math.max(effectiveCounts['led'] || 1, detectedColors.length);
+    effectiveLedColors = detectedColors;
+  }
+
+  const effectiveLedCount = effectiveSelectedIds.includes('led') ? (effectiveCounts['led'] || 1) : 0;
+  const standardPalette = ['Red', 'Green', 'Blue', 'Yellow', 'White', 'Orange'];
+  while (effectiveLedColors.length < effectiveLedCount) {
+    effectiveLedColors.push(standardPalette[effectiveLedColors.length % standardPalette.length]);
+  }
+
+  // Ensure resistors:
+  const effectiveResistors = [...resistors];
+  if (effectiveLedCount > 0) {
+    if (!effectiveSelectedIds.includes('resistor')) {
+      effectiveSelectedIds.push('resistor');
+    }
+    const existing220s = effectiveResistors.filter(r => r.value.includes('220') || r.value.includes('330'));
+    let missing220Count = effectiveLedCount - existing220s.length;
+    let rIdCounter = effectiveResistors.length + 1;
+    while (missing220Count > 0) {
+      effectiveResistors.push({
+        id: `R${rIdCounter++}`,
+        value: '220Ω',
+        label: `LED #${effectiveResistors.length + 1} Current Limiter`
+      });
+      missing220Count--;
+    }
+  }
+
+  if (effectiveSelectedIds.includes('ds18b20')) {
+    if (!effectiveSelectedIds.includes('resistor')) {
+      effectiveSelectedIds.push('resistor');
+    }
+    const has4k7 = effectiveResistors.some(r => r.value.includes('4.7'));
+    if (!has4k7) {
+      effectiveResistors.unshift({
+        id: `R${effectiveResistors.length + 1}`,
+        value: '4.7kΩ',
+        label: 'DS18B20 1-Wire Pull-up'
+      });
+    }
+  }
+
+  const { connections, assignedPinsByComp } = allocatePins(
+    effectiveSelectedIds, 
+    connectionModes, 
+    effectiveCounts, 
+    effectiveLedColors
+  );
+
+  const hasDS18B20 = effectiveSelectedIds.includes('ds18b20');
+  const hasLED = effectiveSelectedIds.includes('led');
+  const hasBuzzer = effectiveSelectedIds.includes('buzzer');
+  const hasServo = effectiveSelectedIds.includes('servo-motor');
+  const hasUltrasonic = effectiveSelectedIds.includes('ultrasonic');
+  const hasMotor = effectiveSelectedIds.includes('motor-driver');
+  const hasRelay = effectiveSelectedIds.includes('relay');
+  const hasLDR = effectiveSelectedIds.includes('ldr');
+  const hasLCD = effectiveSelectedIds.includes('lcd-i2c');
 
   // Handle Resistors integration (Always mounted on breadboard)
-  if (resistors && resistors.length > 0) {
-    resistors.forEach((res, idx) => {
+  if (effectiveResistors && effectiveResistors.length > 0) {
+    let led220Idx = 0;
+    effectiveResistors.forEach((res, idx) => {
       let sideA = 'Circuit Node';
       let sideB = 'Arduino Pin';
       let row = `Row ${String.fromCharCode(65 + (idx % 8))}`;
       let col = 12 + idx * 3;
 
-      if (hasDS18B20 && (res.value.includes('4.7') || idx === 0)) {
+      if (res.value.includes('4.7') || (hasDS18B20 && idx === 0 && !res.value.includes('220'))) {
         const ds18DataPin = assignedPinsByComp['ds18b20']?.['DATA (Yellow/Signal)'] || 'D2';
         sideA = '5V Power Rail (Pull-Up)';
         sideB = `DS18B20 DATA (${ds18DataPin})`;
         row = 'Row C';
         col = 13;
-      } else if (hasLED && (res.value.includes('220') || res.value.includes('330'))) {
-        const ledPin = assignedPinsByComp['led']?.['Anode (Long Leg)'] || 'D13';
-        sideA = `LED Anode (Row E, Col 15)`;
+      } else if (res.value.includes('220') || res.value.includes('330')) {
+        const u = led220Idx;
+        led220Idx++;
+        const unitKey = effectiveLedCount > 1 ? `led-${u + 1}` : 'led';
+        const ledPin = assignedPinsByComp[unitKey]?.['Anode (Long Leg)'] || assignedPinsByComp['led']?.['Anode (Long Leg)'] || (u === 0 ? 'D13' : u === 1 ? 'D12' : 'D11');
+        const ledColor = effectiveLedColors[u] || (u === 0 ? 'Red' : u === 1 ? 'Green' : 'Blue');
+        const colA = 15 + u * 5;
+        sideA = `${ledColor} LED Anode (Row E, Col ${colA})`;
         sideB = `Arduino ${ledPin}`;
         row = 'Row E';
-        col = 14;
+        col = 18 + u * 5;
       } else if (hasLDR && res.value.includes('10k')) {
         sideA = 'LDR Signal / A0';
         sideB = 'GND Rail (Pull-down)';
@@ -572,7 +708,7 @@ export function generateSchematicLocal(
   }
 
   // Assemble Breadboard and Direct Wiring Guide
-  const directComps = selectedComponentIds.filter(id => {
+  const directComps = effectiveSelectedIds.filter(id => {
     const mode = connectionModes[id] || (
       ['led', 'resistor', 'resistor-330', 'ldr', 'push-button'].includes(id)
         ? 'breadboard'
@@ -581,11 +717,11 @@ export function generateSchematicLocal(
     return mode === 'direct';
   });
 
-  const breadboardComps = selectedComponentIds.filter(id => !directComps.includes(id));
+  const breadboardComps = effectiveSelectedIds.filter(id => !directComps.includes(id));
 
   const guideSections: string[] = ['### Self-Processing Circuit Assembly Guide:'];
 
-  if (breadboardComps.length > 0 || resistors.length > 0) {
+  if (breadboardComps.length > 0 || effectiveResistors.length > 0) {
     guideSections.push('#### Part 1: Breadboard Connections');
     guideSections.push('1. **Power Rails**: Connect Arduino **5V** to Breadboard **Red (+) Rail** and Arduino **GND** to **Blue (-) Rail**.');
     guideSections.push('2. **Mounted Components**: Insert the following breadboard-configured components into their designated rows (do NOT double-wire to Arduino directly to avoid conflicts):');
@@ -595,8 +731,8 @@ export function generateSchematicLocal(
         guideSections.push(`   - **${rule.name}**: Insert pins into ${rule.pins.map(p => `${p.pinName} at ${p.breadboardRow}, Col ${p.breadboardCol}`).join('; ')}.`);
       }
     });
-    if (resistors.length > 0) {
-      guideSections.push(`   - **Resistors (${resistors.length})**: Bridge designated tie-points across rows for current limiting or 1-Wire pull-ups.`);
+    if (effectiveResistors.length > 0) {
+      guideSections.push(`   - **Resistors (${effectiveResistors.length})**: Bridge designated tie-points across rows for current limiting or 1-Wire pull-ups.`);
     }
     guideSections.push('3. **Jumper Wires to Arduino**: Run Male-to-Male jumper wires from the breadboard tie-point columns into the assigned Arduino pins.');
   }
@@ -623,46 +759,48 @@ export function generateSchematicLocal(
   const loopReadSnippets: string[] = [];
   const loopActionSnippets: string[] = [];
 
-  // Determine trigger condition from intent
-  const lowerIntent = intent.toLowerCase();
-  let triggerCondition = 'false';
-  let triggerDescription = 'Condition met';
+  // LED Pin & Variable definitions
+  interface LedVarMeta {
+    varName: string;
+    pinNum: string;
+    rawPin: string;
+    color: string;
+    unitKey: string;
+  }
+  const ledVars: LedVarMeta[] = [];
 
-  if (hasDS18B20) {
-    if (lowerIntent.includes('30') || lowerIntent.includes('hot')) {
-      triggerCondition = 'currentTempC >= 30.0';
-      triggerDescription = 'Temperature exceeds 30°C';
-    } else if (lowerIntent.includes('25') || lowerIntent.includes('warm')) {
-      triggerCondition = 'currentTempC >= 25.0';
-      triggerDescription = 'Temperature exceeds 25°C';
+  if (hasLED) {
+    if (effectiveLedCount === 1) {
+      const rawPin = assignedPinsByComp['led']?.['Anode (Long Leg)'] || 'D13';
+      const pinNum = rawPin.replace('D', '');
+      const color = effectiveLedColors[0] || 'Red';
+      const cleanColor = color.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+      const varName = `PIN_LED_${cleanColor}`;
+      ledVars.push({ varName, pinNum, rawPin, color, unitKey: 'led' });
+      globalSnippets.push(`const int ${varName} = ${pinNum}; // ${color} LED on Arduino Pin ${rawPin}`);
+      setupSnippets.push(`pinMode(${varName}, OUTPUT);`);
     } else {
-      triggerCondition = 'currentTempC >= 28.0';
-      triggerDescription = 'Temperature exceeds threshold (28°C)';
+      globalSnippets.push(`// --- LED Pin Definitions (${effectiveLedCount} units configured) ---`);
+      for (let u = 0; u < effectiveLedCount; u++) {
+        const unitKey = `led-${u + 1}`;
+        const color = effectiveLedColors[u] || (u === 0 ? 'Red' : u === 1 ? 'Green' : 'Blue');
+        const cleanColor = color.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+        const rawPin = assignedPinsByComp[unitKey]?.['Anode (Long Leg)'] || (u === 0 ? 'D13' : u === 1 ? 'D12' : 'D11');
+        const pinNum = rawPin.replace('D', '');
+        let varName = `PIN_LED_${cleanColor}`;
+        if (ledVars.some(v => v.varName === varName)) {
+          varName = `PIN_LED_${cleanColor}_${u + 1}`;
+        }
+        ledVars.push({ varName, pinNum, rawPin, color, unitKey });
+        globalSnippets.push(`const int ${varName} = ${pinNum}; // ${color} LED on Arduino Pin ${rawPin}`);
+        setupSnippets.push(`pinMode(${varName}, OUTPUT);`);
+      }
     }
-  } else if (hasUltrasonic) {
-    triggerCondition = '(distanceCm > 0 && distanceCm < 15.0)';
-    triggerDescription = 'Object detected closer than 15cm';
-  } else if (hasLDR) {
-    triggerCondition = 'lightLevel < 400';
-    triggerDescription = 'Ambient light drops below threshold';
-  } else if (selectedComponentIds.includes('push-button')) {
-    triggerCondition = 'buttonPressed';
-    triggerDescription = 'User pushes momentary tactile button';
-  } else if (selectedComponentIds.includes('pir-sensor')) {
-    triggerCondition = 'motionDetected';
-    triggerDescription = 'PIR motion sensor detects movement';
-  } else if (selectedComponentIds.includes('soil-moisture')) {
-    triggerCondition = 'soilValue < 300';
-    triggerDescription = 'Soil moisture drops below threshold (dry soil)';
-  } else {
-    triggerCondition = '(millis() % 2000 < 1000)';
-    triggerDescription = 'Periodic 1-second pulse cycle';
   }
 
-  // Ensure triggerCondition is strictly clean C++ with no comment markers
-  triggerCondition = triggerCondition.replace(/\/\/.*$/, '').trim();
-
-  selectedComponentIds.forEach(id => {
+  // Process other components for libraries, globals, setup, and loop sensor reading
+  effectiveSelectedIds.forEach(id => {
+    if (id === 'led') return; // Handled explicitly for multi-unit & ranges
     const rule = COMPONENT_RULES[id];
     if (!rule) return;
 
@@ -674,8 +812,202 @@ export function generateSchematicLocal(
     if (rule.globalCode) globalSnippets.push(rule.globalCode(compPins));
     if (rule.setupCode) setupSnippets.push(...rule.setupCode(compPins));
     if (rule.loopReadCode) loopReadSnippets.push(...rule.loopReadCode(compPins));
-    if (rule.loopActionCode) loopActionSnippets.push(...rule.loopActionCode(compPins, triggerCondition));
   });
+
+  // Actuator Decision Logic Synthesis
+  let triggerDescription = 'Condition met';
+
+  if (hasDS18B20 && hasLED) {
+    // Parse range specifications from intent
+    interface ParsedTempRange {
+      min: number;
+      max: number;
+      color?: string;
+      label: string;
+      condStr: string;
+    }
+
+    const parsedRanges: ParsedTempRange[] = [];
+    // Matches patterns like "from20-30(light up red led)", "from 20-30", "from 20 to 30", "20-30"
+    const rangeRegex = /(?:(?:from|between)\s*)?(\d+(?:\.\d+)?)\s*(?:-|to|\.\.|and)\s*(\d+(?:\.\d+)?)\s*(?:\(([^)]*)\)|:([^\n,]+)|(?:(?:light\s*up|turn\s*on)\s*([a-zA-Z]+))|([a-zA-Z]+(?:\s*led)?))?/gi;
+    let rMatch;
+    while ((rMatch = rangeRegex.exec(intent)) !== null) {
+      const v1 = parseFloat(rMatch[1]);
+      const v2 = parseFloat(rMatch[2]);
+      const minV = Math.min(v1, v2);
+      const maxV = Math.max(v1, v2);
+      const matchText = rMatch[0].toLowerCase();
+      const detectedColor = ['red', 'green', 'blue', 'yellow', 'white', 'orange'].find(c => matchText.includes(c));
+      const capColor = detectedColor ? (detectedColor.charAt(0).toUpperCase() + detectedColor.slice(1)) : undefined;
+
+      parsedRanges.push({
+        min: minV,
+        max: maxV,
+        color: capColor,
+        label: `${minV}°C - ${maxV}°C`,
+        condStr: `currentTempC >= ${minV.toFixed(1)} && currentTempC <= ${maxV.toFixed(1)}`
+      });
+    }
+
+    // If no explicit ranges found in intent, provide default graded ranges based on LED count
+    if (parsedRanges.length === 0) {
+      if (effectiveLedCount === 1) {
+        let thresh = 30.0;
+        if (lowerIntent.includes('25')) thresh = 25.0;
+        else if (lowerIntent.includes('35')) thresh = 35.0;
+        parsedRanges.push({
+          min: thresh,
+          max: 100.0,
+          color: ledVars[0]?.color,
+          label: `≥ ${thresh}°C`,
+          condStr: `currentTempC >= ${thresh.toFixed(1)}`
+        });
+      } else if (effectiveLedCount === 2) {
+        parsedRanges.push({
+          min: -50.0,
+          max: 29.9,
+          color: ledVars[0]?.color,
+          label: `< 30°C (Normal)`,
+          condStr: `currentTempC < 30.0`
+        });
+        parsedRanges.push({
+          min: 30.0,
+          max: 100.0,
+          color: ledVars[1]?.color,
+          label: `≥ 30°C (High Temp)`,
+          condStr: `currentTempC >= 30.0`
+        });
+      } else {
+        // 3 or more LEDs default bands
+        const defaultBands = [
+          { min: 20.0, max: 30.0, label: '20°C - 30°C (Low Range)' },
+          { min: 31.0, max: 40.0, label: '31°C - 40°C (Medium Range)' },
+          { min: 41.0, max: 50.0, label: '41°C - 50°C (High Range)' },
+        ];
+        defaultBands.slice(0, effectiveLedCount).forEach((b, bIdx) => {
+          parsedRanges.push({
+            min: b.min,
+            max: b.max,
+            color: ledVars[bIdx]?.color,
+            label: b.label,
+            condStr: `currentTempC >= ${b.min.toFixed(1)} && currentTempC <= ${b.max.toFixed(1)}`
+          });
+        });
+      }
+    }
+
+    // Map parsed ranges to specific ledVars
+    const usedLedSet = new Set<string>();
+    const rangeMappings: { range: ParsedTempRange; targetLed: LedVarMeta }[] = [];
+
+    parsedRanges.forEach((rng, rIdx) => {
+      let matchedLed: LedVarMeta | undefined;
+      if (rng.color) {
+        matchedLed = ledVars.find(v => v.color.toLowerCase() === rng.color?.toLowerCase() && !usedLedSet.has(v.varName));
+        if (!matchedLed) {
+          matchedLed = ledVars.find(v => v.color.toLowerCase() === rng.color?.toLowerCase());
+        }
+      }
+      if (!matchedLed) {
+        matchedLed = ledVars.find(v => !usedLedSet.has(v.varName)) || ledVars[rIdx % ledVars.length];
+      }
+      if (matchedLed) {
+        usedLedSet.add(matchedLed.varName);
+        rangeMappings.push({ range: rng, targetLed: matchedLed });
+      }
+    });
+
+    triggerDescription = `Multi-range temperature evaluation (${rangeMappings.map(m => m.range.label).join(', ')})`;
+
+    if (effectiveLedCount === 1 && rangeMappings.length === 1) {
+      const m = rangeMappings[0];
+      loopActionSnippets.push(`// Temperature Threshold: ${m.range.label}`);
+      loopActionSnippets.push(`if (${m.range.condStr}) {`);
+      loopActionSnippets.push(`  // Turn ${m.targetLed.color} LED ON`);
+      loopActionSnippets.push(`  digitalWrite(${m.targetLed.varName}, HIGH);`);
+      loopActionSnippets.push(`} else {`);
+      loopActionSnippets.push(`  // Turn ${m.targetLed.color} LED OFF`);
+      loopActionSnippets.push(`  digitalWrite(${m.targetLed.varName}, LOW);`);
+      loopActionSnippets.push(`}`);
+    } else {
+      loopActionSnippets.push('// Multi-Range Temperature Evaluation:');
+      rangeMappings.forEach((m, idx) => {
+        const isFirst = idx === 0;
+        const ifKw = isFirst ? 'if' : '} else if';
+        loopActionSnippets.push(`${ifKw} (${m.range.condStr}) {`);
+        loopActionSnippets.push(`  // Range ${idx + 1} (${m.range.label}): Light up ${m.targetLed.color} LED`);
+        ledVars.forEach(v => {
+          if (v.varName === m.targetLed.varName) {
+            loopActionSnippets.push(`  digitalWrite(${v.varName}, HIGH);`);
+          } else {
+            loopActionSnippets.push(`  digitalWrite(${v.varName}, LOW);`);
+          }
+        });
+      });
+      loopActionSnippets.push('} else {');
+      loopActionSnippets.push('  // Outside specified temperature ranges: turn all LEDs OFF');
+      ledVars.forEach(v => {
+        loopActionSnippets.push(`  digitalWrite(${v.varName}, LOW);`);
+      });
+      loopActionSnippets.push('}');
+    }
+  } else {
+    // Non-temperature or single trigger condition
+    let triggerCondition = 'false';
+
+    if (hasDS18B20) {
+      triggerCondition = 'currentTempC >= 30.0';
+      triggerDescription = 'Temperature exceeds 30°C';
+    } else if (hasUltrasonic) {
+      triggerCondition = '(distanceCm > 0 && distanceCm < 15.0)';
+      triggerDescription = 'Object detected closer than 15cm';
+    } else if (hasLDR) {
+      triggerCondition = 'lightLevel < 400';
+      triggerDescription = 'Ambient light drops below threshold';
+    } else if (effectiveSelectedIds.includes('push-button')) {
+      triggerCondition = 'buttonPressed';
+      triggerDescription = 'User pushes momentary tactile button';
+    } else if (effectiveSelectedIds.includes('pir-sensor')) {
+      triggerCondition = 'motionDetected';
+      triggerDescription = 'PIR motion sensor detects movement';
+    } else if (effectiveSelectedIds.includes('soil-moisture')) {
+      triggerCondition = 'soilValue < 300';
+      triggerDescription = 'Soil moisture drops below threshold (dry soil)';
+    } else {
+      triggerCondition = '(millis() % 2000 < 1000)';
+      triggerDescription = 'Periodic 1-second pulse cycle';
+    }
+
+    triggerCondition = triggerCondition.replace(/\/\/.*$/, '').trim();
+
+    if (hasLED) {
+      if (effectiveLedCount === 1) {
+        const v = ledVars[0];
+        loopActionSnippets.push(`if (${triggerCondition}) {`);
+        loopActionSnippets.push(`  // Turn ${v.color} LED ON`);
+        loopActionSnippets.push(`  digitalWrite(${v.varName}, HIGH);`);
+        loopActionSnippets.push(`} else {`);
+        loopActionSnippets.push(`  // Turn ${v.color} LED OFF`);
+        loopActionSnippets.push(`  digitalWrite(${v.varName}, LOW);`);
+        loopActionSnippets.push(`}`);
+      } else {
+        loopActionSnippets.push(`if (${triggerCondition}) {`);
+        ledVars.forEach(v => loopActionSnippets.push(`  digitalWrite(${v.varName}, HIGH);`));
+        loopActionSnippets.push(`} else {`);
+        ledVars.forEach(v => loopActionSnippets.push(`  digitalWrite(${v.varName}, LOW);`));
+        loopActionSnippets.push(`}`);
+      }
+    }
+
+    effectiveSelectedIds.forEach(id => {
+      if (id === 'led') return;
+      const rule = COMPONENT_RULES[id];
+      if (rule && rule.loopActionCode) {
+        const compPins = assignedPinsByComp[id] || {};
+        loopActionSnippets.push(...rule.loopActionCode(compPins, triggerCondition));
+      }
+    });
+  }
 
   // LCD display integration in loop if present
   if (hasLCD && hasDS18B20) {
@@ -743,17 +1075,19 @@ export function generateSchematicLocal(
 
   // Generate deterministic serial connection guide for every component
   const sequentialGuides = generateSequentialGuides(
-    selectedComponentIds,
+    effectiveSelectedIds,
     assignedPinsByComp,
-    resistors,
-    connectionModes
+    effectiveResistors,
+    connectionModes,
+    effectiveCounts,
+    effectiveLedColors
   );
 
   // Generate detailed explanation
   const codeExplanation = `### Self-Processing Code Analysis
-- **Architecture**: Assembled deterministically for ${selectedComponentIds.length} connected hardware modules.
+- **Architecture**: Assembled deterministically for ${effectiveSelectedIds.length} connected hardware modules (${effectiveLedCount > 1 ? `${effectiveLedCount} LEDs configured` : '1 LED'}).
 - **Pin Mapping**: Automatically allocated collision-free pins (${Object.entries(assignedPinsByComp).map(([c, pins]) => `${c}: ${Object.values(pins).join(', ')}`).join(' | ')}).
-${hasDS18B20 ? '- **1-Wire Temperature Protocol**: Handled by OneWire and DallasTemperature using internal ROM address indexing.\n' : ''}${resistors.length > 0 ? `- **Resistor Configuration**: Integrated ${resistors.length} resistor(s) (${resistors.map(r => `${r.id}: ${r.value}`).join(', ')}).\n` : ''}- **Execution Loop**: Continuously samples inputs, prints human-readable telemetry to the Serial Monitor at 9600 baud, and activates output actuators when the condition (\`${triggerCondition}\`) is satisfied.`;
+${hasDS18B20 ? '- **1-Wire Temperature Protocol**: Handled by OneWire and DallasTemperature using internal ROM address indexing.\n' : ''}${effectiveResistors.length > 0 ? `- **Resistor Configuration**: Integrated ${effectiveResistors.length} resistor(s) (${effectiveResistors.map(r => `${r.id}: ${r.value}`).join(', ')}).\n` : ''}- **Execution Loop**: Continuously samples inputs, prints human-readable telemetry to the Serial Monitor at 9600 baud, and activates output actuators according to target conditions (${triggerDescription}).`;
 
   return {
     connections,
@@ -772,7 +1106,9 @@ export function generateSequentialGuides(
   selectedComponentIds: string[],
   assignedPinsByComp: Record<string, Record<string, string>>,
   resistors: ResistorItem[],
-  connectionModes: Record<string, ConnectionMode>
+  connectionModes: Record<string, ConnectionMode>,
+  componentCounts: Record<string, number> = {},
+  ledColors: string[] = ['Red']
 ): ComponentSequentialGuide[] {
   const guides: ComponentSequentialGuide[] = [];
 
@@ -788,98 +1124,149 @@ export function generateSequentialGuides(
     const pinMap = assignedPinsByComp[id] || {};
 
     if (id === 'led') {
-      const ledPin = pinMap['Anode (Long Leg)'] || 'D13';
-      const resVal = resistors.find(r => r.value.includes('220') || r.value.includes('330'))?.value || '220Ω';
+      const ledCount = componentCounts['led'] || 1;
+      
+      for (let u = 0; u < ledCount; u++) {
+        const unitKey = ledCount === 1 ? 'led' : `led-${u + 1}`;
+        const color = ledColors[u] || (u === 0 ? 'Red' : u === 1 ? 'Green' : 'Blue');
+        const unitName = ledCount === 1 ? `LED Indicator (${color})` : `LED #${u + 1} (${color})`;
+        const ledPin = assignedPinsByComp[unitKey]?.['Anode (Long Leg)'] || assignedPinsByComp['led']?.['Anode (Long Leg)'] || (u === 0 ? 'D13' : u === 1 ? 'D12' : 'D11');
+        const resVal = resistors[u]?.value || resistors[0]?.value || '220Ω';
+        const colA = 15 + u * 5;
+        const colB = 16 + u * 5;
+        const colRes = 18 + u * 5;
 
-      if (mode === 'breadboard') {
-        guides.push({
-          componentId: id,
-          componentName: compName,
-          location: 'breadboard',
-          locationDetails: 'Breadboard Row E, Columns 15 & 16',
-          overview: `The LED is located on the breadboard. The long leg (anode) goes to one leg of the ${resVal} resistor in series, the other leg of the resistor connects to Arduino digital pin ${ledPin}, and the other leg of the LED (cathode) goes to Arduino GND.`,
-          steps: [
-            {
-              id: `${id}-step-1`,
-              stepNumber: 1,
-              instruction: `Insert the LED into the breadboard: place the long leg (Anode +) into Row E Col 15, and the shorter flat-notched leg (Cathode -) into Row E Col 16.`,
-              fromPoint: 'LED Anode & Cathode',
-              toPoint: 'Breadboard Row E, Cols 15 & 16',
-              wireType: 'Component Legs Insertion',
-              details: 'The longer leg is the positive Anode; the shorter leg (and flat edge on the plastic collar) is the negative Cathode.',
-              completed: false
-            },
-            {
-              id: `${id}-step-2`,
-              stepNumber: 2,
-              instruction: `Connect the resistor in series: insert one leg of the ${resVal} resistor into Row E Col 15 (sharing the tie-point column with the LED long leg), and insert the second leg into Row E Col 18.`,
-              fromPoint: 'LED Long Leg (Anode) at Row E Col 15',
-              toPoint: `Resistor (${resVal}) Leg 1 at Row E Col 15`,
-              wireType: 'Series Breadboard Tie-Point',
-              details: `Placing both legs in column 15 creates a direct physical series connection to limit current through the LED.`,
-              completed: false
-            },
-            {
-              id: `${id}-step-3`,
-              stepNumber: 3,
-              instruction: `Connect the other part of the resistor to the Arduino: run a Male-to-Male jumper wire from Row E Col 18 (the second leg of the resistor) to Arduino digital pin ${ledPin}.`,
-              fromPoint: `Resistor Leg 2 (Row E Col 18)`,
-              toPoint: `Arduino Digital Pin ${ledPin}`,
-              wireType: 'Male-to-Male Jumper Wire',
-              details: `When Arduino pin ${ledPin} outputs 5V (HIGH), electric current flows through the resistor into the LED.`,
-              completed: false
-            },
-            {
-              id: `${id}-step-4`,
-              stepNumber: 4,
-              instruction: `Connect the other leg of the LED to Arduino GND: run a Male-to-Male jumper wire from Row E Col 16 (the short leg of the LED) directly to an Arduino GND pin (or the breadboard blue negative rail).`,
-              fromPoint: 'LED Short Leg (Cathode) at Row E Col 16',
-              toPoint: 'Arduino GND (or Blue - Rail)',
-              wireType: 'Male-to-Male Jumper Wire',
-              details: 'Completes the circuit return path back to the Arduino ground reference.',
-              completed: false
-            }
-          ]
-        });
-      } else {
-        guides.push({
-          componentId: id,
-          componentName: compName,
-          location: 'direct',
-          locationDetails: 'Direct DuPont Jumper Wiring with Inline Resistor',
-          overview: `The LED connects directly to Arduino headers using DuPont jumper cables with a ${resVal} resistor placed inline on the positive lead.`,
-          steps: [
-            {
-              id: `${id}-step-1`,
-              stepNumber: 1,
-              instruction: `Connect the long leg (Anode +) of the LED to one leg of the ${resVal} current-limiting resistor.`,
-              fromPoint: 'LED Long Leg (Anode)',
-              toPoint: `Resistor (${resVal}) Leg 1`,
-              wireType: 'Series Lead Connection',
-              details: 'Never connect an LED directly to 5V without a current-limiting resistor, or the diode will burn out.',
-              completed: false
-            },
-            {
-              id: `${id}-step-2`,
-              stepNumber: 2,
-              instruction: `Connect the second leg of the ${resVal} resistor using a Female-to-Male jumper wire directly into Arduino digital pin ${ledPin}.`,
-              fromPoint: `Resistor (${resVal}) Leg 2`,
-              toPoint: `Arduino Digital Pin ${ledPin}`,
-              wireType: 'Female-to-Male Jumper Cable',
-              details: 'This sends the digital switching signal directly to the resistor input.',
-              completed: false
-            },
-            {
-              id: `${id}-step-3`,
-              stepNumber: 3,
-              instruction: `Connect the short leg (Cathode -) of the LED using a Female-to-Male jumper wire directly into an Arduino GND header pin.`,
-              fromPoint: 'LED Short Leg (Cathode)',
-              toPoint: 'Arduino GND Header',
-              wireType: 'Female-to-Male Jumper Cable',
-              details: 'Provides the common ground return to the microcontroller.',
-              completed: false
-            }
-          ]
+        if (mode === 'breadboard') {
+          guides.push({
+            componentId: unitKey,
+            componentName: unitName,
+            location: 'breadboard',
+            locationDetails: `Breadboard Row E, Columns ${colA} & ${colB}`,
+            overview: `The ${color} LED is located on the breadboard. The long leg (anode) goes to one leg of the ${resVal} resistor in series, the other leg of the resistor connects to Arduino digital pin ${ledPin}, and the other leg of the LED (cathode) goes to Arduino GND.`,
+            steps: [
+              {
+                id: `${unitKey}-step-1`,
+                stepNumber: 1,
+                instruction: `Insert the ${color} LED into the breadboard: place the long leg (Anode +) into Row E Col ${colA}, and the shorter flat-notched leg (Cathode -) into Row E Col ${colB}.`,
+                fromPoint: `${color} LED Anode & Cathode`,
+                toPoint: `Breadboard Row E, Cols ${colA} & ${colB}`,
+                wireType: 'Component Legs Insertion',
+                details: `The longer leg is the positive Anode (+); the shorter leg with the flat rim is the negative Cathode (-).`,
+                completed: false
+              },
+              {
+                id: `${unitKey}-step-2`,
+                stepNumber: 2,
+                instruction: `Connect the resistor in series: insert one leg of the ${resVal} resistor into Row E Col ${colA} (sharing the column with the ${color} LED long leg), and insert the second leg into Row E Col ${colRes}.`,
+                fromPoint: `${color} LED Long Leg at Row E Col ${colA}`,
+                toPoint: `Resistor (${resVal}) Leg 1 at Row E Col ${colA}`,
+                wireType: 'Series Breadboard Tie-Point',
+                details: `Sharing column ${colA} creates a direct physical series connection to limit current and protect the ${color} LED.`,
+                completed: false
+              },
+              {
+                id: `${unitKey}-step-3`,
+                stepNumber: 3,
+                instruction: `Connect the resistor to the Arduino: run a Male-to-Male jumper wire from Row E Col ${colRes} (second leg of resistor) to Arduino digital pin ${ledPin}.`,
+                fromPoint: `Resistor Leg 2 (Row E Col ${colRes})`,
+                toPoint: `Arduino Digital Pin ${ledPin}`,
+                wireType: 'Male-to-Male Jumper Wire',
+                details: `When Arduino pin ${ledPin} is driven HIGH (+5V), current passes through the resistor into the ${color} LED.`,
+                completed: false
+              },
+              {
+                id: `${unitKey}-step-4`,
+                stepNumber: 4,
+                instruction: `Connect the other leg of the LED to Arduino GND: run a Male-to-Male jumper wire from Row E Col ${colB} (the short leg of the ${color} LED) directly to an Arduino GND pin (or breadboard blue negative rail).`,
+                fromPoint: `${color} LED Short Leg (Row E Col ${colB})`,
+                toPoint: 'Arduino GND (or Blue - Rail)',
+                wireType: 'Male-to-Male Jumper Wire',
+                details: 'Completes the ground return circuit path.',
+                completed: false
+              }
+            ]
+          });
+        } else {
+          guides.push({
+            componentId: unitKey,
+            componentName: unitName,
+            location: 'direct',
+            locationDetails: `Direct DuPont Jumper Wiring with ${resVal} Resistor`,
+            overview: `The ${color} LED connects directly to Arduino headers using DuPont jumper cables with a ${resVal} resistor placed inline on the positive lead.`,
+            steps: [
+              {
+                id: `${unitKey}-step-1`,
+                stepNumber: 1,
+                instruction: `Connect the long leg (Anode +) of the ${color} LED to one leg of the ${resVal} current-limiting resistor.`,
+                fromPoint: `${color} LED Long Leg (Anode)`,
+                toPoint: `Resistor (${resVal}) Leg 1`,
+                wireType: 'Series Lead Connection',
+                details: 'Always protect the diode with an inline resistor.',
+                completed: false
+              },
+              {
+                id: `${unitKey}-step-2`,
+                stepNumber: 2,
+                instruction: `Connect the second leg of the ${resVal} resistor to Arduino digital pin ${ledPin} using a Female-to-Male jumper wire.`,
+                fromPoint: `Resistor (${resVal}) Leg 2`,
+                toPoint: `Arduino Digital Pin ${ledPin}`,
+                wireType: 'Female-to-Male Jumper Cable',
+                details: `Provides switching voltage from pin ${ledPin}.`,
+                completed: false
+              },
+              {
+                id: `${unitKey}-step-3`,
+                stepNumber: 3,
+                instruction: `Connect the short leg (Cathode -) of the ${color} LED directly to an Arduino GND header pin using a Female-to-Male jumper wire.`,
+                fromPoint: `${color} LED Short Leg (Cathode)`,
+                toPoint: 'Arduino GND Header',
+                wireType: 'Female-to-Male Jumper Cable',
+                details: 'Provides common ground return.',
+                completed: false
+              }
+            ]
+          });
+        }
+      }
+    } else if (id === 'resistor' || id === 'resistor-330') {
+      // Generate step-by-step guides for each configured resistor
+      if (resistors && resistors.length > 0) {
+        resistors.forEach((res, rIdx) => {
+          const rowLetter = String.fromCharCode(65 + (rIdx % 5));
+          const colStart = 10 + rIdx * 4;
+          const colEnd = colStart + 2;
+          const isLedLimiter = res.value.includes('220') || res.value.includes('330');
+          const isPullUp = res.value.includes('4.7') || res.value.includes('10k');
+
+          guides.push({
+            componentId: `resistor-${res.id}`,
+            componentName: `Resistor ${res.id} (${res.value})`,
+            location: 'breadboard',
+            locationDetails: `Breadboard Row ${rowLetter}, Columns ${colStart} & ${colEnd}`,
+            overview: `Resistor ${res.id} (${res.value}) provides ${isLedLimiter ? 'current limiting' : isPullUp ? 'pull-up voltage stabilization' : 'circuit resistance'} on the breadboard.`,
+            steps: [
+              {
+                id: `res-${res.id}-step-1`,
+                stepNumber: 1,
+                instruction: `Insert Leg 1 of the ${res.value} resistor into Breadboard Row ${rowLetter} Col ${colStart}.`,
+                fromPoint: `Resistor ${res.id} (${res.value}) Leg 1`,
+                toPoint: `Breadboard Row ${rowLetter} Col ${colStart}`,
+                wireType: 'Component Leg Insertion',
+                details: 'Resistors are non-polar; either leg can be Leg 1.',
+                completed: false
+              },
+              {
+                id: `res-${res.id}-step-2`,
+                stepNumber: 2,
+                instruction: `Insert Leg 2 of the ${res.value} resistor into Breadboard Row ${rowLetter} Col ${colEnd}.`,
+                fromPoint: `Resistor ${res.id} (${res.value}) Leg 2`,
+                toPoint: `Breadboard Row ${rowLetter} Col ${colEnd}`,
+                wireType: 'Component Leg Insertion',
+                details: 'Spans two columns to create a secure bridge.',
+                completed: false
+              }
+            ]
+          });
         });
       }
     } else if (id === 'ds18b20') {

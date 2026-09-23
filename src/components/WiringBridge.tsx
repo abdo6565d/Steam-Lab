@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { POPULAR_COMPONENTS, PopularComponent, AIResult, SavedProject, CustomConnection, ResistorItem, ConnectionMode } from '../constants';
+import { 
+  POPULAR_COMPONENTS, 
+  PopularComponent, 
+  AIResult, 
+  SavedProject, 
+  CustomConnection, 
+  ResistorItem, 
+  ConnectionMode,
+  ResistorValueCount,
+  STANDARD_LED_COLORS
+} from '../constants';
 import { generateSchematicLocal, COMPONENT_RULES } from '../lib/selfProcessingEngine';
+import { ComponentConfigModal } from './ComponentConfigModal';
 import { 
   Zap, CircleDot, RotateCw, Radio, Move, Thermometer, Plus, X, ArrowRight, 
   Sparkles, Loader2, MessageSquare, Code, Hash, Grid, Cpu, Sun, Eye, 
@@ -65,9 +76,42 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
     if (initialProject?.resistorValue) {
       return [{ id: 'R1', value: initialProject.resistorValue }];
     }
-    return [{ id: 'R1', value: '4.7kΩ' }];
+    return [{ id: 'R1', value: '220Ω' }];
   });
-  const [customInputs, setCustomInputs] = useState<Record<number, string>>({});
+
+  // Multi-unit component count tracking
+  const [componentCounts, setComponentCounts] = useState<Record<string, number>>(() => {
+    if (initialProject?.componentCounts) return initialProject.componentCounts;
+    return { led: 1, resistor: 1 };
+  });
+
+  // LED Colors tracking
+  const [ledColors, setLedColors] = useState<string[]>(() => {
+    if (initialProject?.ledColors && initialProject.ledColors.length > 0) return initialProject.ledColors;
+    return ['Red'];
+  });
+
+  // Resistor Breakdown by Custom Value & Count
+  const [resistorValueCounts, setResistorValueCounts] = useState<ResistorValueCount[]>(() => {
+    if (initialProject?.resistorValueCounts && initialProject.resistorValueCounts.length > 0) {
+      return initialProject.resistorValueCounts;
+    }
+    if (initialProject?.resistors && initialProject.resistors.length > 0) {
+      const map: Record<string, number> = {};
+      initialProject.resistors.forEach(r => {
+        map[r.value] = (map[r.value] || 0) + 1;
+      });
+      return Object.entries(map).map(([val, cnt]) => ({
+        value: val,
+        count: cnt,
+        label: val.includes('220') ? 'LED Current Limiter' : val.includes('4.7') ? 'DS18B20 1-Wire' : val.includes('10k') ? 'Pull-Up / LDR' : 'Custom Value'
+      }));
+    }
+    return [{ value: '220Ω', count: 1, label: 'LED Current Limiter' }];
+  });
+
+  // Modal configuration state
+  const [configuringComponentId, setConfiguringComponentId] = useState<string | null>(null);
 
   // Connection Routing State: Direct to Arduino vs Through Breadboard
   const [componentConnectionModes, setComponentConnectionModes] = useState<Record<string, ConnectionMode>>(() => {
@@ -88,6 +132,50 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastSavedStateRef = useRef<string>('');
 
+  // Sync flat resistors array whenever resistorValueCounts change
+  const syncResistorsFromValueCounts = (counts: ResistorValueCount[]) => {
+    const newResistors: ResistorItem[] = [];
+    let rIdx = 1;
+    counts.forEach(item => {
+      for (let i = 0; i < item.count; i++) {
+        newResistors.push({
+          id: `R${rIdx++}`,
+          value: item.value,
+          label: item.label
+        });
+      }
+    });
+    const finalResistors = newResistors.length > 0 ? newResistors : [{ id: 'R1', value: '220Ω', label: 'Default' }];
+    setResistors(finalResistors);
+    return finalResistors;
+  };
+
+  const handleUpdateComponentCount = (compId: string, newCount: number) => {
+    const safeCount = Math.max(1, Math.min(8, newCount));
+    setComponentCounts(prev => ({
+      ...prev,
+      [compId]: safeCount
+    }));
+
+    if (compId === 'led') {
+      setLedColors(prev => {
+        if (safeCount > prev.length) {
+          const palette = ['Red', 'Green', 'Blue', 'Yellow', 'White', 'Orange'];
+          const next = [...prev];
+          for (let i = prev.length; i < safeCount; i++) {
+            next.push(palette[i % palette.length]);
+          }
+          return next;
+        } else if (safeCount < prev.length) {
+          return prev.slice(0, safeCount);
+        }
+        return prev;
+      });
+    }
+
+    setIsSaved(false);
+  };
+
   // Load initial project if provided, or restore draft from localStorage
   useEffect(() => {
     if (initialProject) {
@@ -96,6 +184,15 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
       setIntent(initialProject.intent || '');
       setAiResult(initialProject.result || null);
       setProjectName(initialProject.name || '');
+      if (initialProject.componentCounts) {
+        setComponentCounts(initialProject.componentCounts);
+      }
+      if (initialProject.ledColors && initialProject.ledColors.length > 0) {
+        setLedColors(initialProject.ledColors);
+      }
+      if (initialProject.resistorValueCounts && initialProject.resistorValueCounts.length > 0) {
+        setResistorValueCounts(initialProject.resistorValueCounts);
+      }
       if (initialProject.resistors && initialProject.resistors.length > 0) {
         setResistors(initialProject.resistors);
       } else if (initialProject.resistorValue) {
@@ -114,8 +211,11 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
         intent: initialProject.intent,
         result: initialProject.result,
         name: initialProject.name,
-        resistors: initialProject.resistors || [{ id: 'R1', value: initialProject.resistorValue || '4.7kΩ' }],
-        componentConnectionModes: initialProject.componentConnectionModes || {}
+        resistors: initialProject.resistors || [{ id: 'R1', value: initialProject.resistorValue || '220Ω' }],
+        componentConnectionModes: initialProject.componentConnectionModes || {},
+        componentCounts: initialProject.componentCounts || {},
+        ledColors: initialProject.ledColors || [],
+        resistorValueCounts: initialProject.resistorValueCounts || []
       });
     } else {
       // Check if there is an existing draft in localStorage to prevent data loss
@@ -129,6 +229,9 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
             if (draft.intent) setIntent(draft.intent);
             if (draft.result) setAiResult(draft.result);
             if (draft.name) setProjectName(draft.name);
+            if (draft.componentCounts) setComponentCounts(draft.componentCounts);
+            if (draft.ledColors) setLedColors(draft.ledColors);
+            if (draft.resistorValueCounts) setResistorValueCounts(draft.resistorValueCounts);
             if (draft.resistors && draft.resistors.length > 0) {
               setResistors(draft.resistors);
             } else if (draft.resistorValue) {
@@ -146,8 +249,11 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
               intent: draft.intent,
               result: draft.result,
               name: draft.name,
-              resistors: draft.resistors || [{ id: 'R1', value: draft.resistorValue || '4.7kΩ' }],
-              componentConnectionModes: draft.componentConnectionModes || {}
+              resistors: draft.resistors || [{ id: 'R1', value: draft.resistorValue || '220Ω' }],
+              componentConnectionModes: draft.componentConnectionModes || {},
+              componentCounts: draft.componentCounts || {},
+              ledColors: draft.ledColors || [],
+              resistorValueCounts: draft.resistorValueCounts || []
             });
           }
         }
@@ -165,16 +271,26 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
     currentComponentIds: string[],
     currentResult: AIResult | null,
     currentResistors: ResistorItem[],
-    currentConnectionModes: Record<string, ConnectionMode>
+    currentConnectionModes: Record<string, ConnectionMode>,
+    currentCounts?: Record<string, number>,
+    currentColors?: string[],
+    currentValCounts?: ResistorValueCount[]
   ) => {
-    const primaryResistorVal = currentResistors[0]?.value || '4.7kΩ';
+    const primaryResistorVal = currentResistors[0]?.value || '220Ω';
+    const counts = currentCounts || componentCounts;
+    const colors = currentColors || ledColors;
+    const valCounts = currentValCounts || resistorValueCounts;
+
     const currentStateStr = JSON.stringify({
       selectedComponentIds: currentComponentIds,
       intent: currentIntent,
       result: currentResult,
       name: currentName,
       resistors: currentResistors,
-      componentConnectionModes: currentConnectionModes
+      componentConnectionModes: currentConnectionModes,
+      componentCounts: counts,
+      ledColors: colors,
+      resistorValueCounts: valCounts
     });
 
     // Skip if nothing changed from last saved state
@@ -194,6 +310,9 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
       resistorValue: primaryResistorVal,
       resistors: currentResistors,
       componentConnectionModes: currentConnectionModes,
+      componentCounts: counts,
+      ledColors: colors,
+      resistorValueCounts: valCounts,
       timestamp
     };
     try {
@@ -213,7 +332,10 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
         result: currentResult,
         resistorValue: primaryResistorVal,
         resistors: currentResistors,
-        componentConnectionModes: currentConnectionModes
+        componentConnectionModes: currentConnectionModes,
+        componentCounts: counts,
+        ledColors: colors,
+        resistorValueCounts: valCounts
       };
 
       onSave(projectToSave);
@@ -225,9 +347,9 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
     setAutoSaveStatus('saved');
     const now = new Date();
     setLastSavedTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-  }, [onSave, onProjectChange]);
+  }, [onSave, onProjectChange, componentCounts, ledColors, resistorValueCounts]);
 
-  // Trigger auto-save whenever wiring configuration, components, resistors list, connection modes, or intent change
+  // Trigger auto-save whenever wiring configuration, components, resistors list, connection modes, or counts change
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false;
@@ -242,7 +364,10 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
       result: aiResult,
       name: projectName,
       resistors,
-      componentConnectionModes
+      componentConnectionModes,
+      componentCounts,
+      ledColors,
+      resistorValueCounts
     });
 
     if (currentStateStr === lastSavedStateRef.current) {
@@ -257,7 +382,18 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
 
     // Debounce to batch rapid keystrokes/clicks while ensuring prompt auto-save
     debounceTimerRef.current = setTimeout(() => {
-      executeAutoSave(projectId, projectName, intent, selectedPopularIds, aiResult, resistors, componentConnectionModes);
+      executeAutoSave(
+        projectId, 
+        projectName, 
+        intent, 
+        selectedPopularIds, 
+        aiResult, 
+        resistors, 
+        componentConnectionModes,
+        componentCounts,
+        ledColors,
+        resistorValueCounts
+      );
     }, 500);
 
     return () => {
@@ -265,7 +401,20 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
         clearTimeout(debounceTimerRef.current);
       }
     };
-  }, [selectedPopularIds, intent, projectName, aiResult, resistors, componentConnectionModes, autoSaveEnabled, projectId, executeAutoSave]);
+  }, [
+    selectedPopularIds, 
+    intent, 
+    projectName, 
+    aiResult, 
+    resistors, 
+    componentConnectionModes, 
+    componentCounts, 
+    ledColors, 
+    resistorValueCounts, 
+    autoSaveEnabled, 
+    projectId, 
+    executeAutoSave
+  ]);
 
   // Flush auto-save immediately on page unload/navigation to prevent data loss
   useEffect(() => {
@@ -273,12 +422,35 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
-      executeAutoSave(projectId, projectName, intent, selectedPopularIds, aiResult, resistors, componentConnectionModes);
+      executeAutoSave(
+        projectId, 
+        projectName, 
+        intent, 
+        selectedPopularIds, 
+        aiResult, 
+        resistors, 
+        componentConnectionModes,
+        componentCounts,
+        ledColors,
+        resistorValueCounts
+      );
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [projectId, projectName, intent, selectedPopularIds, aiResult, resistors, componentConnectionModes, executeAutoSave]);
+  }, [
+    projectId, 
+    projectName, 
+    intent, 
+    selectedPopularIds, 
+    aiResult, 
+    resistors, 
+    componentConnectionModes, 
+    componentCounts, 
+    ledColors, 
+    resistorValueCounts, 
+    executeAutoSave
+  ]);
 
   const togglePopularComponent = (id: string) => {
     setSelectedPopularIds(prev => {
@@ -286,7 +458,11 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
       const next = isRemoving ? prev.filter(i => i !== id) : [...prev, id];
       
       if (!isRemoving) {
-        // When adding a new component, assign initial default connection mode and prompt user
+        if (!componentCounts[id]) {
+          setComponentCounts(curr => ({ ...curr, [id]: 1 }));
+        }
+
+        // When adding a new component, assign initial default connection mode
         const defaultMode: ConnectionMode = ['led', 'resistor', 'resistor-330', 'ldr', 'push-button'].includes(id) 
           ? 'breadboard' 
           : 'direct';
@@ -305,12 +481,17 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
 
       // If user adds ds18b20 and no resistor has 4.7kΩ, ensure a 4.7kΩ resistor is available
       if (!isRemoving && id === 'ds18b20') {
-        const has4k7 = resistors.some(r => r.value === '4.7kΩ');
+        const has4k7 = resistorValueCounts.some(r => r.value === '4.7kΩ' && r.count > 0);
         if (!has4k7) {
-          if (next.includes('resistor') || next.includes('resistor-330')) {
-            // Update R1 to 4.7kΩ
-            setResistors(curr => curr.map((r, idx) => idx === 0 ? { ...r, value: '4.7kΩ', label: 'DS18B20 1-Wire' } : r));
+          const updatedValCounts = [...resistorValueCounts];
+          const existingIdx = updatedValCounts.findIndex(r => r.value === '4.7kΩ');
+          if (existingIdx >= 0) {
+            updatedValCounts[existingIdx].count = Math.max(1, updatedValCounts[existingIdx].count);
+          } else {
+            updatedValCounts.push({ value: '4.7kΩ', count: 1, label: 'DS18B20 1-Wire' });
           }
+          setResistorValueCounts(updatedValCounts);
+          syncResistorsFromValueCounts(updatedValCounts);
         }
       }
       return next;
@@ -329,70 +510,28 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
 
     // If schematic is already generated, refresh it immediately without conflicts or duplicate pins
     if (aiResult) {
-      const refreshed = generateSchematicLocal(selectedPopularIds, intent, resistors, updatedModes);
+      const refreshed = generateSchematicLocal(
+        selectedPopularIds, 
+        intent, 
+        resistors, 
+        updatedModes,
+        componentCounts,
+        ledColors
+      );
       setAiResult(refreshed);
-      executeAutoSave(projectId, projectName, intent, selectedPopularIds, refreshed, resistors, updatedModes);
+      executeAutoSave(
+        projectId, 
+        projectName, 
+        intent, 
+        selectedPopularIds, 
+        refreshed, 
+        resistors, 
+        updatedModes,
+        componentCounts,
+        ledColors,
+        resistorValueCounts
+      );
     }
-    setIsSaved(false);
-  };
-
-  // Multi-Resistor Management Functions
-  const addResistor = (suggestedValue = '220Ω', suggestedLabel = '') => {
-    const newIdx = resistors.length + 1;
-    const newResistor: ResistorItem = {
-      id: `R${newIdx}`,
-      value: suggestedValue,
-      label: suggestedLabel
-    };
-    setResistors(prev => [...prev, newResistor]);
-    setIsSaved(false);
-  };
-
-  const removeResistor = (index: number) => {
-    if (resistors.length <= 1) return;
-    setResistors(prev => {
-      const filtered = prev.filter((_, i) => i !== index);
-      return filtered.map((r, i) => ({ ...r, id: `R${i + 1}` }));
-    });
-    setIsSaved(false);
-  };
-
-  const updateResistorValue = (index: number, newValue: string) => {
-    setResistors(prev => {
-      const updated = [...prev];
-      updated[index] = { ...updated[index], value: newValue };
-      return updated;
-    });
-    setIsSaved(false);
-  };
-
-  const applyCustomResistorValue = (index: number, val: string) => {
-    if (!val.trim()) return;
-    let formatted = val.trim();
-    if (!formatted.includes('Ω') && !formatted.toLowerCase().includes('ohm')) {
-      formatted += 'Ω';
-    }
-    updateResistorValue(index, formatted);
-    setCustomInputs(prev => ({ ...prev, [index]: '' }));
-  };
-
-  const setResistorCount = (count: number) => {
-    const target = Math.max(1, Math.min(8, count));
-    setResistors(prev => {
-      if (prev.length === target) return prev;
-      if (prev.length < target) {
-        const next = [...prev];
-        for (let i = prev.length; i < target; i++) {
-          next.push({ 
-            id: `R${i + 1}`, 
-            value: i === 1 ? '220Ω' : (i === 2 ? '10kΩ' : '1kΩ') 
-          });
-        }
-        return next;
-      } else {
-        return prev.slice(0, target).map((r, i) => ({ ...r, id: `R${i + 1}` }));
-      }
-    });
     setIsSaved(false);
   };
 
@@ -409,7 +548,103 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
     try {
       // 100% Deterministic Self-Processing Circuit Engine
       await new Promise(r => setTimeout(r, 80)); // Brief smooth UI pulse
-      const data = generateSchematicLocal(selectedPopularIds, intent, resistors, componentConnectionModes);
+
+      // Intelligent Intent Detection: sync UI selections if specified in prompt
+      const lowerIntent = intent.toLowerCase();
+      let targetSelectedIds = [...selectedPopularIds];
+      let targetCounts = { ...componentCounts };
+      let targetLedColors = [...ledColors];
+      let targetResistorValCounts = [...resistorValueCounts];
+
+      // Detect LED count from prompt
+      const ledMatch = lowerIntent.match(/(\d+)\s*leds?/i);
+      if (ledMatch) {
+        const n = parseInt(ledMatch[1], 10);
+        if (n > 0 && n <= 8) {
+          targetCounts['led'] = Math.max(targetCounts['led'] || 1, n);
+          if (!targetSelectedIds.includes('led')) targetSelectedIds.push('led');
+        }
+      }
+
+      // Detect LED colors from prompt in order of appearance
+      const detectedColors: string[] = [];
+      const colorOrder = ['red', 'green', 'blue', 'yellow', 'white', 'orange'];
+      const colorMatches: { color: string; index: number }[] = [];
+      colorOrder.forEach(c => {
+        let idx = lowerIntent.indexOf(c);
+        while (idx !== -1) {
+          const before = idx === 0 ? ' ' : lowerIntent[idx - 1];
+          const after = idx + c.length >= lowerIntent.length ? ' ' : lowerIntent[idx + c.length];
+          if (/[\s\(\[\,\-\:\;\)\.\/]/.test(before) && /[\s\(\[\,\-\:\;\)\.\/]/.test(after)) {
+            colorMatches.push({ color: c.charAt(0).toUpperCase() + c.slice(1), index: idx });
+          }
+          idx = lowerIntent.indexOf(c, idx + 1);
+        }
+      });
+      colorMatches.sort((a, b) => a.index - b.index);
+      colorMatches.forEach(m => {
+        if (!detectedColors.includes(m.color)) {
+          detectedColors.push(m.color);
+        }
+      });
+
+      if (detectedColors.length > 0) {
+        if (!targetSelectedIds.includes('led')) targetSelectedIds.push('led');
+        targetCounts['led'] = Math.max(targetCounts['led'] || 1, detectedColors.length);
+        targetLedColors = detectedColors;
+        const palette = ['Red', 'Green', 'Blue', 'Yellow', 'White', 'Orange'];
+        while (targetLedColors.length < (targetCounts['led'] || 1)) {
+          targetLedColors.push(palette[targetLedColors.length % palette.length]);
+        }
+      }
+
+      // If temperature is mentioned, ensure DS18B20 is selected
+      if (
+        lowerIntent.includes('temp') || 
+        lowerIntent.includes('ds18b20') || 
+        lowerIntent.includes('degree') || 
+        lowerIntent.includes('°c') || 
+        lowerIntent.includes('celsius')
+      ) {
+        if (!targetSelectedIds.includes('ds18b20')) targetSelectedIds.push('ds18b20');
+      }
+
+      // Resistors alignment
+      const effLedCount = targetSelectedIds.includes('led') ? (targetCounts['led'] || 1) : 0;
+      if (effLedCount > 0) {
+        if (!targetSelectedIds.includes('resistor')) targetSelectedIds.push('resistor');
+        const ex220 = targetResistorValCounts.find(r => r.value === '220Ω');
+        if (ex220) {
+          ex220.count = Math.max(ex220.count, effLedCount);
+        } else {
+          targetResistorValCounts.unshift({ value: '220Ω', count: effLedCount, label: 'LED Current Limiter' });
+        }
+      }
+
+      if (targetSelectedIds.includes('ds18b20')) {
+        if (!targetSelectedIds.includes('resistor')) targetSelectedIds.push('resistor');
+        const has4k7 = targetResistorValCounts.some(r => r.value === '4.7kΩ' && r.count > 0);
+        if (!has4k7) {
+          targetResistorValCounts.push({ value: '4.7kΩ', count: 1, label: 'DS18B20 1-Wire Pull-Up' });
+        }
+      }
+
+      const activeResistors = syncResistorsFromValueCounts(targetResistorValCounts);
+
+      // Update state for UI synchronicity
+      setSelectedPopularIds(targetSelectedIds);
+      setComponentCounts(targetCounts);
+      setLedColors(targetLedColors);
+      setResistorValueCounts(targetResistorValCounts);
+
+      const data = generateSchematicLocal(
+        targetSelectedIds, 
+        intent, 
+        activeResistors, 
+        componentConnectionModes,
+        targetCounts,
+        targetLedColors
+      );
 
       setAiResult(data);
       
@@ -419,7 +654,18 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
       }
 
       // Automatically auto-save immediately to localStorage
-      executeAutoSave(projectId, effectiveName, intent, selectedPopularIds, data, resistors, componentConnectionModes);
+      executeAutoSave(
+        projectId, 
+        effectiveName, 
+        intent, 
+        targetSelectedIds, 
+        data, 
+        activeResistors, 
+        componentConnectionModes,
+        targetCounts,
+        targetLedColors,
+        targetResistorValCounts
+      );
 
     } catch (error: any) {
       console.error("Failed to process schematic:", error);
@@ -576,221 +822,184 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
             {POPULAR_COMPONENTS.map(comp => {
               const Icon = ICON_MAP[comp.icon] || Zap;
               const isSelected = selectedPopularIds.includes(comp.id) || (comp.id === 'resistor' && selectedPopularIds.includes('resistor-330'));
+              const isLed = comp.id === 'led';
               const isResistor = comp.id === 'resistor' || comp.id === 'resistor-330';
               
-              let displayName = comp.name;
-              if (isResistor) {
-                if (resistors.length === 1) {
-                  displayName = `${resistors[0].value} Resistor`;
-                } else {
-                  displayName = `${resistors.length} Resistors (${resistors.map(r => r.value).join(', ')})`;
-                }
-              }
+              // Total quantity of this component
+              const count = isResistor 
+                ? resistorValueCounts.reduce((sum, r) => sum + r.count, 0)
+                : (componentCounts[comp.id] || 1);
 
               return (
-                <button
+                <div
                   key={comp.id}
-                  onClick={() => togglePopularComponent(comp.id)}
+                  onClick={() => {
+                    if (!isSelected) {
+                      togglePopularComponent(comp.id);
+                    }
+                  }}
                   className={cn(
-                    "flex flex-col items-center gap-2.5 p-3.5 rounded-2xl border transition-all text-left relative group",
+                    "flex flex-col justify-between p-3 rounded-2xl border transition-all relative group select-none cursor-pointer",
                     isSelected 
-                      ? "bg-lab-accent/10 border-lab-accent text-white shadow-lg shadow-lab-accent/10 scale-[1.02]" 
+                      ? "bg-lab-accent/10 border-lab-accent text-white shadow-lg shadow-lab-accent/10 scale-[1.01]" 
                       : "bg-lab-card border-lab-border text-lab-muted hover:border-lab-muted hover:text-lab-text"
                   )}
                 >
-                  {isResistor && (
-                    <span className="absolute top-2 right-2 text-[9px] bg-lab-accent/20 text-lab-accent px-1.5 py-0.5 rounded font-mono font-bold">
-                      {resistors.length === 1 ? resistors[0].value : `${resistors.length}x`}
+                  {/* Top Bar: Icon + Remove button or Tag */}
+                  <div className="flex items-start justify-between w-full mb-2">
+                    <div className={cn(
+                      "w-8 h-8 rounded-xl flex items-center justify-center border transition-all",
+                      isSelected 
+                        ? "bg-lab-accent/20 border-lab-accent/40 text-lab-accent" 
+                        : "bg-black/30 border-lab-border text-lab-muted"
+                    )}>
+                      <Icon className="w-4 h-4" />
+                    </div>
+
+                    {isSelected ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          togglePopularComponent(comp.id);
+                        }}
+                        className="p-1 rounded-lg text-lab-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                        title={`Remove ${comp.name}`}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    ) : comp.id === 'ds18b20' ? (
+                      <span className="text-[8px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded font-bold uppercase">
+                        1-Wire
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {/* Component Info */}
+                  <div className="mb-2">
+                    <span className="text-xs font-bold text-white block leading-tight">
+                      {comp.name}
                     </span>
+
+                    {/* LED Multi-Color Indicator Dots */}
+                    {isSelected && isLed && (
+                      <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                        {ledColors.slice(0, count).map((colName, cIdx) => {
+                          const colMeta = STANDARD_LED_COLORS.find(c => c.name.toLowerCase() === colName.toLowerCase()) || STANDARD_LED_COLORS[0];
+                          return (
+                            <span 
+                              key={cIdx} 
+                              className="w-2.5 h-2.5 rounded-full inline-block border border-white/30"
+                              style={{ backgroundColor: colMeta.hex, boxShadow: `0 0 6px ${colMeta.glow}` }}
+                              title={`LED #${cIdx + 1}: ${colName}`}
+                            />
+                          );
+                        })}
+                        <span className="text-[10px] text-lab-muted font-mono ml-1 font-semibold">
+                          {count}x ({ledColors.slice(0, count).join(', ')})
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Resistor Custom Values & Numbers */}
+                    {isSelected && isResistor && (
+                      <div className="text-[10px] text-lab-accent font-mono mt-1 font-semibold truncate" title={resistorValueCounts.filter(r => r.count > 0).map(r => `${r.count}x ${r.value}`).join(', ')}>
+                        {resistorValueCounts.filter(r => r.count > 0).map(r => `${r.count}x ${r.value}`).join(', ') || `${count}x Custom`}
+                      </div>
+                    )}
+
+                    {/* Other components count tag */}
+                    {isSelected && !isLed && !isResistor && count > 1 && (
+                      <div className="text-[10px] text-lab-accent font-mono mt-1 font-semibold">
+                        {count} Units active
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Bottom Controls: Quantity Stepper & Adjust Screen Trigger */}
+                  {isSelected ? (
+                    <div 
+                      className="mt-auto pt-2 border-t border-lab-border/60 flex items-center justify-between gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Mini Stepper */}
+                      <div className="flex items-center bg-black/60 border border-lab-border rounded-lg p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isResistor) {
+                              setConfiguringComponentId(comp.id);
+                            } else {
+                              handleUpdateComponentCount(comp.id, Math.max(1, count - 1));
+                            }
+                          }}
+                          disabled={count <= 1}
+                          className="w-5 h-5 flex items-center justify-center text-lab-muted hover:text-white rounded disabled:opacity-20 text-xs font-bold"
+                          title="Decrease count"
+                        >
+                          -
+                        </button>
+                        <span className="w-5 text-center text-xs font-mono font-bold text-lab-accent">
+                          {count}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isResistor) {
+                              setConfiguringComponentId(comp.id);
+                            } else {
+                              handleUpdateComponentCount(comp.id, Math.min(8, count + 1));
+                            }
+                          }}
+                          disabled={count >= 8}
+                          className="w-5 h-5 flex items-center justify-center text-lab-muted hover:text-white rounded disabled:opacity-20 text-xs font-bold"
+                          title="Increase count"
+                        >
+                          +
+                        </button>
+                      </div>
+
+                      {/* Small Screen / Adjust Button */}
+                      <button
+                        type="button"
+                        onClick={() => setConfiguringComponentId(comp.id)}
+                        className="px-2 py-1 bg-lab-accent/15 hover:bg-lab-accent/25 text-lab-accent border border-lab-accent/30 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all"
+                        title="Adjust count, colors & values"
+                      >
+                        <Sliders className="w-3 h-3" />
+                        <span>Adjust</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-auto pt-2 text-[10px] text-lab-muted flex items-center justify-between">
+                      <span>Add to circuit</span>
+                      <Plus className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 group-hover:text-lab-accent transition-all" />
+                    </div>
                   )}
-                  {comp.id === 'ds18b20' && (
-                    <span className="absolute top-2 right-2 text-[8px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded font-bold uppercase">
-                      1-Wire
-                    </span>
-                  )}
-                  <Icon className={cn("w-6 h-6", isSelected ? "text-lab-accent" : "text-lab-muted")} />
-                  <span className="text-[10px] font-bold text-center leading-tight">{displayName}</span>
-                </button>
+                </div>
               );
             })}
           </div>
 
-          {/* Multi-Resistor Configuration Panel */}
-          {isResistorSelected && (
-            <motion.div
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-lab-card/90 border border-lab-accent/40 rounded-2xl p-5 space-y-4 shadow-sm"
-            >
-              {/* Header: Title and Quantity Stepper */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-lab-border/40 pb-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-lab-accent/15 border border-lab-accent/30 flex items-center justify-center text-lab-accent shrink-0">
-                    <Hash className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h4 className="text-xs font-bold uppercase tracking-wider text-white">Resistors Configuration</h4>
-                      <span className="text-[10px] bg-lab-accent/20 text-lab-accent px-2 py-0.5 rounded-md font-mono font-bold border border-lab-accent/30">
-                        {resistors.length} Resistor{resistors.length > 1 ? 's' : ''} Configured
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-lab-muted">
-                      Choose how many resistors you need and specify the resistance value for each one.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Resistor Count Stepper & Add Button */}
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center bg-black/50 border border-lab-border rounded-xl p-1">
-                    <button
-                      type="button"
-                      onClick={() => setResistorCount(resistors.length - 1)}
-                      disabled={resistors.length <= 1}
-                      className="w-7 h-7 flex items-center justify-center rounded-lg text-lab-muted hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent font-bold"
-                      title="Decrease resistor count"
-                    >
-                      -
-                    </button>
-                    <span className="px-3 text-xs font-mono font-bold text-white">
-                      {resistors.length}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setResistorCount(resistors.length + 1)}
-                      disabled={resistors.length >= 8}
-                      className="w-7 h-7 flex items-center justify-center rounded-lg text-lab-muted hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent font-bold"
-                      title="Increase resistor count"
-                    >
-                      +
-                    </button>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => addResistor(resistors.length === 1 ? '220Ω' : '10kΩ')}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-lab-accent/15 hover:bg-lab-accent/25 text-lab-accent border border-lab-accent/40 rounded-xl text-xs font-bold transition-all"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Resistor</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Individual Resistors List */}
-              <div className="space-y-3">
-                {resistors.map((resistor, idx) => (
-                  <div 
-                    key={resistor.id}
-                    className="bg-black/40 border border-lab-border/70 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3 hover:border-lab-accent/30 transition-all"
-                  >
-                    <div className="flex items-center gap-2.5 shrink-0">
-                      <span className="w-7 h-7 rounded-lg bg-lab-accent/20 border border-lab-accent/40 text-lab-accent font-mono font-bold text-xs flex items-center justify-center">
-                        {resistor.id}
-                      </span>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-white">{resistor.id} Value:</span>
-                          <span className="text-xs font-mono font-bold text-lab-accent bg-lab-accent/10 px-2 py-0.5 rounded border border-lab-accent/20">
-                            {resistor.value}
-                          </span>
-                        </div>
-                        {resistor.label && (
-                          <span className="text-[10px] text-lab-muted">{resistor.label}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      {/* Presets */}
-                      <div className="flex flex-wrap items-center gap-1 bg-black/50 p-1 rounded-xl border border-lab-border">
-                        {POPULAR_RESISTOR_PRESETS.map((preset) => (
-                          <button
-                            key={preset.value}
-                            type="button"
-                            onClick={() => updateResistorValue(idx, preset.value)}
-                            className={cn(
-                              "px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold transition-all whitespace-nowrap",
-                              resistor.value === preset.value
-                                ? "bg-lab-accent text-white shadow-sm"
-                                : "text-lab-muted hover:text-white hover:bg-white/5"
-                            )}
-                            title={preset.label}
-                          >
-                            {preset.value}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* Custom Input */}
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="text"
-                          value={customInputs[idx] || ''}
-                          onChange={(e) => setCustomInputs(prev => ({ ...prev, [idx]: e.target.value }))}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') applyCustomResistorValue(idx, customInputs[idx] || '');
-                          }}
-                          placeholder="e.g. 560Ω"
-                          className="bg-black/60 border border-lab-border rounded-xl px-2 py-1 text-xs text-white font-mono w-20 focus:outline-none focus:border-lab-accent"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => applyCustomResistorValue(idx, customInputs[idx] || '')}
-                          className="px-2 py-1 bg-lab-card hover:bg-lab-accent hover:text-white border border-lab-border rounded-xl text-xs font-bold text-lab-muted transition-colors"
-                        >
-                          Set
-                        </button>
-                      </div>
-
-                      {/* Delete Button (if more than 1 resistor) */}
-                      {resistors.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => removeResistor(idx)}
-                          className="p-1.5 text-lab-muted hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors ml-1"
-                          title={`Remove ${resistor.id}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Helpful Recommendation Shortcuts */}
-              <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-lab-muted">
-                <span className="font-semibold text-white/80">Quick Recommendations:</span>
-                {isDS18B20Selected && !resistors.some(r => r.value === '4.7kΩ') && (
-                  <button
-                    type="button"
-                    onClick={() => addResistor('4.7kΩ', 'DS18B20 1-Wire Pull-up')}
-                    className="px-2 py-0.5 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/30 rounded-lg font-medium transition-colors"
-                  >
-                    + Add 4.7kΩ for DS18B20
-                  </button>
-                )}
-                {isLEDSelected && !resistors.some(r => r.value === '220Ω' || r.value === '330Ω') && (
-                  <button
-                    type="button"
-                    onClick={() => addResistor('220Ω', 'LED Current Limiter')}
-                    className="px-2 py-0.5 bg-lab-accent/15 hover:bg-lab-accent/25 text-lab-accent border border-lab-accent/30 rounded-lg font-medium transition-colors"
-                  >
-                    + Add 220Ω for LED
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => addResistor('10kΩ', 'Pull-Up / Sensor')}
-                  className="px-2 py-0.5 bg-white/5 hover:bg-white/10 text-lab-text border border-lab-border rounded-lg font-medium transition-colors"
-                >
-                  + Add 10kΩ for Buttons / Sensors
-                </button>
-              </div>
-            </motion.div>
-          )}
+          {/* Component Configuration Small Screen / Modal */}
+          <ComponentConfigModal
+            isOpen={configuringComponentId !== null}
+            onClose={() => setConfiguringComponentId(null)}
+            componentId={configuringComponentId}
+            componentCounts={componentCounts}
+            onUpdateCount={handleUpdateComponentCount}
+            ledColors={ledColors}
+            onUpdateLedColors={(colors) => {
+              setLedColors(colors);
+              setIsSaved(false);
+            }}
+            resistorValueCounts={resistorValueCounts}
+            onUpdateResistorValueCounts={(valCounts) => {
+              setResistorValueCounts(valCounts);
+              syncResistorsFromValueCounts(valCounts);
+              setIsSaved(false);
+            }}
+          />
 
           {/* Helper banner when DS18B20 is selected without any resistor */}
           {isDS18B20Selected && !isResistorSelected && (
@@ -805,7 +1014,9 @@ export default function WiringBridge({ onSave, initialProject, onProjectChange }
                 type="button"
                 onClick={() => {
                   setSelectedPopularIds(prev => [...prev, 'resistor']);
-                  setResistors([{ id: 'R1', value: '4.7kΩ', label: 'DS18B20 Pull-up' }]);
+                  const updatedValCounts = [{ value: '4.7kΩ', count: 1, label: 'DS18B20 1-Wire' }];
+                  setResistorValueCounts(updatedValCounts);
+                  syncResistorsFromValueCounts(updatedValCounts);
                   setIsSaved(false);
                 }}
                 className="px-2.5 py-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-200 border border-blue-500/40 rounded-lg text-[11px] font-bold transition-colors whitespace-nowrap ml-2"
